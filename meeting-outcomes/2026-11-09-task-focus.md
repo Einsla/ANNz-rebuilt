@@ -1,6 +1,6 @@
 # ANNzPlus Python Rebuild — Meeting Notes
 
-**Date:** Monday, 9 November 2026  
+**Date:** Monday, 2 November 2026  
 **Meeting focus:** Define the first task phase for rebuilding the legacy ANNzPlus website/software in Python  
 **Status:** Preparation notes; record confirmed outcomes during or after the meeting.
 
