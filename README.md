@@ -63,3 +63,16 @@ Planning stage. The repository is currently being initialized. Research decision
 - Legacy software: [imdadmpt/ANNzPlus](https://github.com/imdadmpt/ANNzPlus)
 - Original ANNz reference cited by the legacy project: Collister & Lahav (2004), [The Astronomical Journal](https://iopscience.iop.org/article/10.1086/383254)
 - ANNz+ publication cited by the legacy project: Mahmud Pathi et al. (2025), [Journal of Cosmology and Astroparticle Physics](https://iopscience.iop.org/article/10.1088/1475-7516/2025/01/097/meta)
+
+## Run the local prototype
+
+The early Streamlit interface lets a user upload a CSV or TSV catalogue, choose **Input variables** (measurements used by the model) and **Target variable(s)** (values to predict), and configure hidden-layer sizes and an activation function. It validates selected numeric columns, previews inputs and targets separately, and downloads the choices as `architecture_config.json`.
+
+From the repository root, install the dependencies and launch it locally:
+
+```bash
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+```
+
+This prototype prepares data selections; model training, full project save/open, resumable checkpoints, and batch loading for very large catalogues are not implemented yet. Legacy `.net` and positional catalogue exports are not part of this standalone Python workflow.
