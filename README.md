@@ -75,4 +75,4 @@ python -m pip install -r requirements.txt
 python -m streamlit run app.py
 ```
 
-This prototype prepares data selections; model training, full project save/open, resumable checkpoints, and batch loading for very large catalogues are not implemented yet. Legacy `.net` and positional catalogue exports are not part of this standalone Python workflow.
+The app can export and reopen a project ZIP containing the architecture settings and optionally the uploaded catalogue. Training results and resumable checkpoints are not included because model training is not implemented yet. The catalogue and ZIP are held in memory, so this prototype is not suitable for very large catalogues. Legacy `.net` and positional catalogue exports are not part of this standalone Python workflow.
