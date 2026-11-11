@@ -56,7 +56,7 @@ The initial scope is the core workflow needed to train and evaluate photometric-
 
 ## Project status
 
-Planning stage. The repository is currently being initialized. Research decisions, implementation choices, datasets, and results should be added as they are confirmed; do not present proposed work as completed findings.
+A local Streamlit prototype is under development. It supports catalogue upload, input and target selection, batched data-quality summaries, exploratory sample correlations, and project ZIP export/import. Neural-network training, prediction, and checkpoint recovery have not been implemented. Research decisions, datasets, and evaluation results should be recorded as they are confirmed.
 
 ## Reference
 
@@ -64,15 +64,12 @@ Planning stage. The repository is currently being initialized. Research decision
 - Original ANNz reference cited by the legacy project: Collister & Lahav (2004), [The Astronomical Journal](https://iopscience.iop.org/article/10.1086/383254)
 - ANNz+ publication cited by the legacy project: Mahmud Pathi et al. (2025), [Journal of Cosmology and Astroparticle Physics](https://iopscience.iop.org/article/10.1088/1475-7516/2025/01/097/meta)
 
-## Run the local prototype
 
-The early Streamlit interface lets a user upload a CSV or TSV catalogue, choose **Input variables** (measurements used by the model) and **Target variable(s)** (values to predict), and configure hidden-layer sizes and an activation function. It validates selected numeric columns, previews inputs and targets separately, and downloads the choices as `architecture_config.json`.
+## Local app prototype
 
-From the repository root, install the dependencies and launch it locally:
+Run the local application from the repository root:
 
-```bash
-python -m pip install -r requirements.txt
-python -m streamlit run app.py
-```
+    python -m pip install -r requirements.txt
+    python -m streamlit run app.py
 
-The app can export and reopen a project ZIP containing the architecture settings and optionally the uploaded catalogue. Training results and resumable checkpoints are not included because model training is not implemented yet. The catalogue and ZIP are held in memory, so this prototype is not suitable for very large catalogues. Legacy `.net` and positional catalogue exports are not part of this standalone Python workflow.
+The current interface analyzes galaxy catalogue data and saves its settings and available analysis reports in a project ZIP. The optional original source file is stored under data/; generated quality statistics and sample correlations are stored under analysis/. Model training and prediction are still future work.
