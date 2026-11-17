@@ -43,7 +43,27 @@ def _model_signature(architecture: dict, preparation: DataPreparation) -> str:
 def restore_project(zip_bytes: bytes) -> None:
     """Restore app settings, source data, reports, split settings, and checkpoint."""
     project = open_project_zip(zip_bytes)
+    st.session_state.pop("auto_tuned_architecture", None)
+    st.session_state.pop("auto_tuning_results", None)
     config = project.architecture
+    saved_training = project.training_config or {}
+    st.session_state["training_config"] = saved_training
+    st.session_state["auto_tuning_results"] = project.optimisation_results
+    optimisation = saved_training.get("optimisation", {})
+    if optimisation.get("completed"):
+        st.session_state["auto_tuned_architecture"] = config
+    for key, value in (
+        ("search_mode", optimisation.get("mode", "Automatic")),
+        ("search_activations", optimisation.get("activations", ["leaky_relu", "relu"])),
+        ("search_learning_rates", optimisation.get("learning_rates", [0.0003, 0.001])),
+        ("search_architectures_text", optimisation.get("manual_layouts_text", "64\n128,64\n128,128")),
+        ("search_epochs", optimisation.get("max_epochs", 80)),
+        ("search_patience", optimisation.get("patience", 10)),
+        ("epochs", saved_training.get("additional_epochs", 10)),
+        ("learning_rate", saved_training.get("learning_rate", 0.001)),
+        ("compute_device", saved_training.get("device", "auto")),
+    ):
+        st.session_state[key] = value
     st.session_state["loaded_project_fingerprint"] = hashlib.sha256(zip_bytes).hexdigest()
     st.session_state["loaded_data_source_name"] = project.data_source_name
     st.session_state["loaded_data_source_bytes"] = project.data_source_bytes
@@ -139,6 +159,8 @@ if st.session_state.get("data_source_fingerprint") != data_fingerprint:
         st.session_state["checkpoint_signature"] = None
         st.session_state["training_history"] = None
         st.session_state["evaluation_report"] = None
+        st.session_state.pop("auto_tuned_architecture", None)
+        st.session_state.pop("auto_tuning_results", None)
         st.session_state["saved_quality_summary"] = None
         st.session_state["saved_sample_correlations"] = None
 
@@ -280,6 +302,7 @@ if st.session_state.get("data_preparation_signature") not in {
     st.session_state["trained_checkpoint"] = None
     st.session_state["checkpoint_signature"] = None
     st.session_state["training_history"] = None
+    st.session_state.pop("auto_tuning_results", None)
 if st.session_state.get("data_preparation_signature") != current_preparation_signature:
     st.session_state["data_preparation"] = None
     st.session_state["data_preparation_signature"] = current_preparation_signature
@@ -363,6 +386,270 @@ try:
 except ValueError as exc:
     st.info(f"Choose valid inputs and targets to configure the network: {exc}")
 
+# A completed search remains selected across Streamlit reruns until cleared.
+tuned_config = st.session_state.get("auto_tuned_architecture")
+if (
+    tuned_config
+    and architecture is not None
+    and tuned_config.get("input_columns") == list(inputs)
+    and tuned_config.get("target_columns") == list(targets)
+):
+    architecture = architecture_from_selections(
+        tuned_config["input_columns"],
+        tuned_config["target_columns"],
+        tuned_config["hidden_layers"],
+        tuned_config["activation"],
+    )
+
+if architecture is not None and preparation is not None:
+    device_choice = st.selectbox(
+        "Compute device for training and optimisation",
+        ["auto", "cpu", "cuda"],
+        index=0,
+        key="compute_device",
+    )
+    st.subheader("5. Optimise the network")
+    st.write(
+        "Compare candidate networks using validation loss. Each candidate starts with "
+        "fresh weights; the test split is kept out of model selection."
+    )
+    st.caption(
+        "The search compares hidden-layer layouts, activation functions, and learning "
+        "rates. It uses Adam, validation MSE, and early stopping."
+    )
+    if preparation.validation_fraction <= 0:
+        st.warning("Set a validation share above 0% in section 3 before running optimisation.")
+    else:
+        search_mode = st.radio(
+            "How should candidate architectures be generated?",
+            ["Automatic", "Manual"],
+            horizontal=True,
+            key="search_mode",
+            help="Automatic generates a compact set of common layer layouts. Manual lets you specify each layout.",
+        )
+        search_col1, search_col2 = st.columns(2)
+        with search_col1:
+            search_activations = st.multiselect(
+                "Activation functions to compare",
+                sorted(SUPPORTED_ACTIVATIONS),
+                default=["leaky_relu", "relu"],
+                key="search_activations",
+            )
+            search_learning_rates = st.multiselect(
+                "Learning rates to compare",
+                [0.0001, 0.0003, 0.001, 0.003, 0.01],
+                default=[0.0003, 0.001],
+                key="search_learning_rates",
+                format_func=lambda value: f"{value:g}",
+            )
+        with search_col2:
+            if search_mode == "Automatic":
+                automatic_layouts = [
+                    (32,), (64,), (128,), (64, 32),
+                    (128, 64), (128, 128),
+                ]
+                st.write("**Generated hidden-layer layouts**")
+                st.code("\n".join(",".join(map(str, layout)) for layout in automatic_layouts))
+                st.caption(
+                    "These are candidate sizes, not a guarantee of a globally optimal network. "
+                    "You can switch to Manual to define your own layouts."
+                )
+                parsed_layouts = automatic_layouts
+            else:
+                search_architectures_text = st.text_area(
+                    "Hidden-layer layouts (one candidate per line)",
+                    value="64\n128,64\n128,128",
+                    key="search_architectures_text",
+                    help="64 means one 64-neuron layer; 128,64 means two layers.",
+                )
+                parsed_layouts = []
+                layout_errors = []
+                for line_number, line in enumerate(search_architectures_text.splitlines(), start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        layout = tuple(int(part.strip()) for part in line.split(","))
+                        if not layout or any(size < 1 or size > 4096 for size in layout):
+                            raise ValueError
+                        parsed_layouts.append(layout)
+                    except ValueError:
+                        layout_errors.append(
+                            f"Line {line_number}: use comma-separated integers from 1 to 4096."
+                        )
+                for message in layout_errors:
+                    st.error(message)
+            search_epochs = st.number_input(
+                "Maximum epochs per candidate", 5, 300, 80, step=5,
+                key="search_epochs",
+            )
+            search_patience = st.number_input(
+                "Early-stopping patience", 2, 40, 10, step=1,
+                key="search_patience",
+                help="Stop a candidate after this many epochs without validation-loss improvement.",
+            )
+        if search_mode == "Automatic":
+            layout_errors = []
+            manual_layouts_text = ""
+        candidate_count = (
+            len(parsed_layouts) * len(search_activations) * len(search_learning_rates)
+        )
+        st.caption(
+            f"Planned search: {len(parsed_layouts)} layouts × "
+            f"{len(search_activations)} activations × "
+            f"{len(search_learning_rates)} learning rates = {candidate_count} candidates."
+        )
+        if candidate_count > 24:
+            st.warning("Please reduce the search to 24 candidates or fewer to keep the run manageable.")
+        if st.button(
+            "Run optimisation",
+            type="primary",
+            disabled=(
+                not parsed_layouts
+                or not search_activations
+                or not search_learning_rates
+                or bool(layout_errors)
+                or candidate_count > 24
+                or preparation.validation_fraction <= 0
+            ),
+        ):
+            candidates = [
+                (layout, activation_name, float(rate))
+                for layout in parsed_layouts
+                for activation_name in search_activations
+                for rate in search_learning_rates
+            ]
+            search_progress = st.progress(0.0)
+            search_status = st.empty()
+            candidate_rows = []
+            best_result = None
+            best_score = float("inf")
+            try:
+                for candidate_index, (layout, activation_name, rate) in enumerate(candidates):
+                    candidate_architecture = architecture_from_selections(
+                        inputs, targets, layout, activation_name
+                    )
+                    search_status.write(
+                        f"Candidate {candidate_index + 1}/{len(candidates)}: "
+                        f"{activation_name}, layers {list(layout)}, learning rate {rate:g}"
+                    )
+
+                    def candidate_progress(event):
+                        if event["validation_loss"] is None:
+                            message = (
+                                f"Candidate {candidate_index + 1}/{len(candidates)} · "
+                                f"epoch {event['epoch']}"
+                            )
+                        else:
+                            message = (
+                                f"Candidate {candidate_index + 1}/{len(candidates)} · "
+                                f"epoch {event['epoch']} · validation loss "
+                                f"{event['validation_loss']:.6g}"
+                            )
+                        search_status.write(message)
+
+                    candidate_result = train_model(
+                        io.BytesIO(data_source_bytes),
+                        candidate_architecture,
+                        preparation,
+                        epochs=int(search_epochs),
+                        learning_rate=rate,
+                        separator=separator,
+                        device=device_choice,
+                        early_stopping_patience=int(search_patience),
+                        on_epoch=candidate_progress,
+                    )
+                    score = candidate_result["best_validation_loss"]
+                    candidate_rows.append({
+                        "activation": activation_name,
+                        "hidden_layers": str(list(layout)),
+                        "learning_rate": rate,
+                        "best_epoch": candidate_result["best_epoch"],
+                        "epochs_run": candidate_result["completed_epoch"],
+                        "validation_loss": score,
+                        "stopped_early": candidate_result["stopped_early"],
+                    })
+                    if score is not None and score < best_score:
+                        best_score = score
+                        best_result = {
+                            "architecture": candidate_architecture,
+                            "result": candidate_result,
+                            "learning_rate": rate,
+                        }
+                    search_progress.progress((candidate_index + 1) / len(candidates))
+                if best_result is None:
+                    raise ValueError(
+                        "No candidate produced a validation score. Check the validation split."
+                    )
+                best_architecture = best_result["architecture"]
+                best_training = best_result["result"]
+                results_frame = pd.DataFrame(candidate_rows).sort_values(
+                    "validation_loss", na_position="last"
+                )
+                optimisation_config = {
+                    "completed": True,
+                    "mode": search_mode,
+                    "activations": list(search_activations),
+                    "learning_rates": [float(value) for value in search_learning_rates],
+                    "candidate_layouts": [list(layout) for layout in parsed_layouts],
+                    "manual_layouts_text": (
+                        search_architectures_text if search_mode == "Manual" else ""
+                    ),
+                    "max_epochs": int(search_epochs),
+                    "patience": int(search_patience),
+                    "optimizer": "Adam",
+                    "selection_metric": "validation_mean_squared_error",
+                    "best_validation_loss": float(best_score),
+                    "best_epoch": int(best_training["best_epoch"]),
+                    "best_learning_rate": float(best_result["learning_rate"]),
+                    "best_hidden_layers": list(best_architecture.hidden_layers),
+                    "best_activation": best_architecture.activation,
+                }
+                st.session_state["auto_tuned_architecture"] = best_architecture.to_config_dict()
+                st.session_state["trained_checkpoint"] = best_training["checkpoint_bytes"]
+                st.session_state["checkpoint_signature"] = _model_signature(
+                    best_architecture.to_config_dict(), preparation
+                )
+                st.session_state["training_history"] = best_training["history"]
+                st.session_state["last_epoch"] = best_training["completed_epoch"]
+                st.session_state["learning_rate"] = best_result["learning_rate"]
+                st.session_state["training_config"] = {
+                    "optimizer": "Adam",
+                    "learning_rate": float(best_result["learning_rate"]),
+                    "device": device_choice,
+                    "additional_epochs": 10,
+                    "optimisation": optimisation_config,
+                }
+                st.session_state["evaluation_report"] = None
+                st.session_state["auto_tuning_results"] = results_frame
+                architecture = best_architecture
+                st.success(
+                    f"Optimisation complete. Best validation loss: {best_score:.6g}; "
+                    f"best epoch: {best_training['best_epoch']}."
+                )
+            except (ValueError, RuntimeError, OSError) as exc:
+                st.error(f"Automatic optimisation did not finish: {exc}")
+
+    if st.session_state.get("auto_tuning_results") is not None:
+        st.markdown("**Hyperparameter search results (ranked by validation loss)**")
+        st.dataframe(
+            st.session_state["auto_tuning_results"],
+            hide_index=True,
+            use_container_width=True,
+        )
+        if st.session_state.get("auto_tuned_architecture"):
+            st.info(
+                "The winning architecture, checkpoint, and optimisation settings are selected. "
+                "They will be included in the project ZIP."
+            )
+        if st.button("Clear optimisation result and use manual settings"):
+            for key in (
+                "auto_tuned_architecture", "auto_tuning_results", "trained_checkpoint",
+                "checkpoint_signature", "training_history", "evaluation_report",
+                "training_config",
+            ):
+                st.session_state.pop(key, None)
+            st.rerun()
+
 if architecture is not None and preparation is not None:
     model_signature = _model_signature(architecture.to_config_dict(), preparation)
     if st.session_state.get("checkpoint_signature") not in {None, model_signature}:
@@ -371,18 +658,14 @@ if architecture is not None and preparation is not None:
         st.session_state["evaluation_report"] = None
     st.session_state["checkpoint_signature"] = model_signature
 
-    st.subheader("5. Train the network")
-    train_left, train_mid, train_right = st.columns(3)
+    st.subheader("6. Train the network")
+    train_left, train_mid = st.columns(2)
     with train_left:
         epochs = st.number_input("Additional epochs", 1, 500, 10, step=1, key="epochs")
     with train_mid:
         learning_rate = st.number_input(
             "Learning rate", min_value=0.000001, max_value=1.0, value=0.001,
             format="%.6f", key="learning_rate",
-        )
-    with train_right:
-        device_choice = st.selectbox(
-            "Compute device", ["auto", "cpu", "cuda"], index=0, key="compute_device"
         )
     st.caption(
         "Training rereads the source in bounded chunks. If a checkpoint exists, "
@@ -419,6 +702,13 @@ if architecture is not None and preparation is not None:
             st.session_state["trained_checkpoint"] = result["checkpoint_bytes"]
             st.session_state["checkpoint_signature"] = model_signature
             st.session_state["training_history"] = result["history"]
+            st.session_state["training_config"] = {
+                **st.session_state.get("training_config", {}),
+                "optimizer": "Adam",
+                "learning_rate": float(learning_rate),
+                "device": device_choice,
+                "additional_epochs": int(epochs),
+            }
             st.session_state["last_epoch"] = result["completed_epoch"]
             st.session_state["evaluation_report"] = None
             progress.progress(1.0)
@@ -436,7 +726,7 @@ if architecture is not None and preparation is not None:
 
     checkpoint = st.session_state.get("trained_checkpoint")
     if checkpoint:
-        st.subheader("6. Evaluate the model")
+        st.subheader("7. Evaluate the model")
         split = st.selectbox(
             "Evaluation data split",
             ["test", "validation", "train"],
@@ -468,7 +758,7 @@ if architecture is not None and preparation is not None:
                 "outlier fraction (|delta z| >= 0.15). MAE/RMSE use original target units."
             )
 
-        st.subheader("7. Generate predictions")
+        st.subheader("8. Generate predictions")
         prediction_upload = st.file_uploader(
             "Upload a catalogue containing the selected input columns",
             type=["csv", "tsv"],
@@ -498,7 +788,7 @@ if architecture is not None and preparation is not None:
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(f"Could not generate predictions: {exc}")
 
-st.subheader("8. Save the project")
+st.subheader("9. Save the project")
 include_data = st.checkbox(
     "Include the original data source in the project ZIP", value=True
 )
@@ -516,23 +806,57 @@ if st.button("Prepare project ZIP"):
             sample_correlations=sample_correlations,
             checkpoint_bytes=st.session_state.get("trained_checkpoint"),
             training_history=st.session_state.get("training_history"),
+            training_config={
+                **st.session_state.get("training_config", {}),
+                "optimizer": "Adam",
+                "learning_rate": float(st.session_state.get("learning_rate", 0.001)),
+                "device": st.session_state.get("compute_device", "auto"),
+                "additional_epochs": int(st.session_state.get("epochs", 10)),
+            },
+            optimisation_results=st.session_state.get("auto_tuning_results"),
         )
-        col_a, col_b = st.columns(2)
+        reusable_config_zip = create_project_zip(
+            architecture.to_config_dict(),
+            data_preparation_config=preparation.to_config_dict() if preparation else None,
+            data_source_name=data_source_name,
+            data_source_sha256=data_fingerprint,
+            checkpoint_bytes=st.session_state.get("trained_checkpoint"),
+            training_history=st.session_state.get("training_history"),
+            training_config={
+                **st.session_state.get("training_config", {}),
+                "optimizer": "Adam",
+                "learning_rate": float(st.session_state.get("learning_rate", 0.001)),
+                "device": st.session_state.get("compute_device", "auto"),
+                "additional_epochs": int(st.session_state.get("epochs", 10)),
+            },
+            optimisation_results=st.session_state.get("auto_tuning_results"),
+        )
+        col_a, col_b, col_c = st.columns(3)
         with col_a:
             st.download_button(
-                "Download architecture settings",
+                "Download architecture JSON",
                 json.dumps(architecture.to_config_dict(), indent=2),
                 file_name="architecture_config.json",
                 mime="application/json",
             )
         with col_b:
             st.download_button(
-                "Download project ZIP",
+                "Download reusable settings ZIP",
+                reusable_config_zip,
+                file_name="annzplus_optimised_architecture.zip",
+                mime="application/zip",
+                help="Contains architecture, data-scaling/split settings, optimised hyperparameters, search results, and checkpoint, but not the original catalogue.",
+            )
+        with col_c:
+            st.download_button(
+                "Download full project ZIP",
                 project_zip,
                 file_name="galaxy_analysis_project.zip",
                 mime="application/zip",
             )
         st.info(
-            "The ZIP includes the network and data settings, available analysis reports, "
-            "optional source data, and a resumable model checkpoint when training has begun."
+            "The ZIP includes the winning architecture, optimisation search settings and ranked "
+            "candidate results, data-preparation settings, optional source data, analysis reports, "
+            "training history, and a resumable model checkpoint when training has begun. "
+            "Reopen this ZIP after restarting the app to restore these settings."
         )

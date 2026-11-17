@@ -13,7 +13,7 @@ import zipfile
 import pandas as pd
 
 
-PROJECT_FORMAT_VERSION = 4
+PROJECT_FORMAT_VERSION = 5
 MANIFEST_NAME = "project.json"
 
 
@@ -30,6 +30,8 @@ class ProjectArchive:
     sample_correlations: pd.DataFrame | None
     checkpoint_bytes: bytes | None
     training_history: pd.DataFrame | None
+    training_config: dict[str, Any] | None = None
+    optimisation_results: pd.DataFrame | None = None
 
 
 def _safe_archive_path(value: str) -> str:
@@ -51,8 +53,10 @@ def create_project_zip(
     sample_correlations: pd.DataFrame | None = None,
     checkpoint_bytes: bytes | None = None,
     training_history: pd.DataFrame | None = None,
+    training_config: dict[str, Any] | None = None,
+    optimisation_results: pd.DataFrame | None = None,
 ) -> bytes:
-    """Package settings, optional data, analysis reports, and model checkpoint."""
+    """Package settings, optional data, reports, search results, and checkpoint."""
     if data_source_bytes is not None and data_source_name is None:
         raise ValueError("A data source filename is required when including its contents.")
     safe_name = PurePosixPath((data_source_name or "").replace("\\", "/")).name
@@ -67,11 +71,13 @@ def create_project_zip(
         "sample_correlations": "analysis/sample_correlations.csv" if sample_correlations is not None else None,
         "training_checkpoint": "training/checkpoint.pt" if checkpoint_bytes is not None else None,
         "training_history": "training/history.csv" if training_history is not None else None,
+        "optimisation_results": "training/optimisation_results.csv" if optimisation_results is not None else None,
     }
     manifest = {
         "format_version": PROJECT_FORMAT_VERSION,
         "architecture": architecture_config,
         "data_preparation": data_preparation_config,
+        "training_config": training_config,
         "data_source_name": safe_name or None,
         "data_source_sha256": data_source_sha256,
         "files": files,
@@ -100,13 +106,19 @@ def create_project_zip(
                 files["training_history"],
                 training_history.to_csv(index=False, lineterminator="\n"),
             )
+        if optimisation_results is not None:
+            archive.writestr(
+                files["optimisation_results"],
+                optimisation_results.to_csv(index=False, lineterminator="\n"),
+            )
         archive.writestr(
             "README.txt",
             "Galaxy neural-network analysis project\n"
-            "project.json stores network and data-preparation settings.\n"
+            "project.json stores architecture, data preparation, and training settings.\n"
             "data/ contains the original source when included.\n"
             "analysis/ contains data-quality and exploratory reports.\n"
-            "training/ contains model weights, optimizer progress, and loss history when available.\n",
+            "training/ contains model weights, loss history, and optimisation results when available.\n"
+            "Reopen this ZIP in the app to restore the saved configuration.\n",
         )
     return output.getvalue()
 
@@ -119,7 +131,7 @@ def open_project_zip(zip_bytes: bytes) -> ProjectArchive:
             if MANIFEST_NAME not in names:
                 raise ValueError("This ZIP has no project.json manifest.")
             manifest = json.loads(archive.read(MANIFEST_NAME).decode("utf-8"))
-            if manifest.get("format_version") not in {1, 2, 3, PROJECT_FORMAT_VERSION}:
+            if manifest.get("format_version") not in {1, 2, 3, 4, PROJECT_FORMAT_VERSION}:
                 raise ValueError("This project uses an unsupported format version.")
             architecture = manifest.get("architecture")
             if not isinstance(architecture, dict):
@@ -127,6 +139,9 @@ def open_project_zip(zip_bytes: bytes) -> ProjectArchive:
             preparation = manifest.get("data_preparation")
             if preparation is not None and not isinstance(preparation, dict):
                 raise ValueError("The project data-preparation settings are invalid.")
+            training_config = manifest.get("training_config")
+            if training_config is not None and not isinstance(training_config, dict):
+                raise ValueError("The project training settings are invalid.")
             files = manifest.get("files", {})
             if not isinstance(files, dict):
                 files = {}
@@ -163,6 +178,10 @@ def open_project_zip(zip_bytes: bytes) -> ProjectArchive:
                 ),
                 training_history=_read_csv_member(
                     archive, names, files.get("training_history")
+                ),
+                training_config=training_config,
+                optimisation_results=_read_csv_member(
+                    archive, names, files.get("optimisation_results")
                 ),
             )
     except zipfile.BadZipFile as exc:

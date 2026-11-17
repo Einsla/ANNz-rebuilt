@@ -125,15 +125,20 @@ def train_model(
     checkpoint_bytes: bytes | None = None,
     separator: str = ",",
     device: str = "auto",
+    early_stopping_patience: int | None = None,
     on_epoch: Callable[[dict], None] | None = None,
 ) -> dict:
-    """Train additional epochs in mini-batches; return a resumable checkpoint."""
+    """Train in mini-batches; optionally stop and restore the best validation epoch."""
     if epochs < 1 or learning_rate <= 0:
         raise ValueError("Epochs and learning rate must be positive.")
+    if early_stopping_patience is not None and early_stopping_patience < 1:
+        raise ValueError("Early-stopping patience must be at least one.")
     if tuple(architecture.input_columns) != preparation.input_columns:
         raise ValueError("Network inputs do not match the prepared data.")
     if tuple(architecture.target_columns) != preparation.target_columns:
         raise ValueError("Network targets do not match the prepared data.")
+    if early_stopping_patience is not None and preparation.validation_fraction <= 0:
+        raise ValueError("Early stopping requires a non-empty validation split.")
     torch, nn = _torch()
     target_device = _device(torch, device)
     torch.manual_seed(preparation.random_seed)
@@ -152,6 +157,12 @@ def train_model(
         first_epoch = int(state["epoch"])
 
     latest = checkpoint_bytes
+    best_checkpoint = checkpoint_bytes
+    best_validation_loss = float("inf")
+    best_epoch = first_epoch
+    epochs_without_improvement = 0
+    stopped_early = False
+    completed_epoch = first_epoch
     for epoch in range(first_epoch + 1, first_epoch + epochs + 1):
         model.train()
         loss_sum = 0.0
@@ -171,21 +182,46 @@ def train_model(
             row_count += len(x_np)
         if row_count == 0:
             raise ValueError("The training split contains no usable rows.")
+        validation_loss = _validation_loss(
+            model, source, preparation, separator, torch, target_device
+        )
         record = {
             "epoch": epoch,
             "training_loss": loss_sum / (row_count * len(preparation.target_columns)),
-            "validation_loss": _validation_loss(
-                model, source, preparation, separator, torch, target_device
-            ),
+            "validation_loss": validation_loss,
         }
         history.append(record)
         latest = _pack_checkpoint(torch, model, optimizer, epoch, signature, history)
+        completed_epoch = epoch
+        if validation_loss is not None and validation_loss < best_validation_loss:
+            best_validation_loss = validation_loss
+            best_epoch = epoch
+            best_checkpoint = latest
+            epochs_without_improvement = 0
+        elif early_stopping_patience is not None and validation_loss is not None:
+            epochs_without_improvement += 1
         if on_epoch:
             on_epoch({**record, "checkpoint_bytes": latest, "device": str(target_device)})
+        if (
+            early_stopping_patience is not None
+            and validation_loss is not None
+            and epochs_without_improvement >= early_stopping_patience
+        ):
+            stopped_early = True
+            break
+
+    selected_checkpoint = best_checkpoint if early_stopping_patience is not None else latest
+    if selected_checkpoint is None:
+        selected_checkpoint = latest
     return {
-        "checkpoint_bytes": latest,
+        "checkpoint_bytes": selected_checkpoint,
         "history": pd.DataFrame(history),
-        "completed_epoch": first_epoch + epochs,
+        "completed_epoch": completed_epoch,
+        "best_epoch": best_epoch if best_epoch > first_epoch else completed_epoch,
+        "best_validation_loss": (
+            best_validation_loss if best_validation_loss < float("inf") else None
+        ),
+        "stopped_early": stopped_early,
         "device": str(target_device),
     }
 
