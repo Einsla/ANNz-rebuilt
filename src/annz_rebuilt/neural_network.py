@@ -73,7 +73,7 @@ def _read_checkpoint(blob: bytes, torch, device, signature: str):
     return state
 
 
-def _pack_checkpoint(torch, model, optimizer, epoch: int, signature: str, history: list[dict]) -> bytes:
+def _pack_checkpoint(torch, model, optimizer, epoch: int, signature: str, history: list[dict], optimizer_name: str = "adam") -> bytes:
     buffer = io.BytesIO()
     torch.save(
         {
@@ -82,6 +82,7 @@ def _pack_checkpoint(torch, model, optimizer, epoch: int, signature: str, histor
             "signature": signature,
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
+            "optimizer_name": optimizer_name,
             "history": history,
         },
         buffer,
@@ -115,6 +116,147 @@ def _validation_loss(model, source, preparation, separator, torch, device) -> fl
     return total / (rows * len(preparation.target_columns)) if rows else None
 
 
+
+def _train_lbfgs(
+    source, architecture, preparation, *, epochs, checkpoint_bytes, separator,
+    device, early_stopping_patience, on_epoch, history_size,
+):
+    """Train with full-batch L-BFGS (a quasi-Newton method).
+
+    This is a PyTorch L-BFGS implementation, not a bit-for-bit port of the
+    legacy ANNzPlus vmmin routine. L-BFGS needs a consistent full-batch
+    objective, so this path materializes the train and validation splits.
+    """
+    torch, _ = _torch()
+    target_device = _device(torch, device)
+    torch.manual_seed(preparation.random_seed)
+    model = build_network(architecture).to(target_device)
+    optimizer = torch.optim.LBFGS(
+        model.parameters(), lr=1.0, max_iter=1, history_size=history_size,
+        line_search_fn="strong_wolfe",
+    )
+    signature = _signature(architecture, preparation)
+    history = []
+    first_epoch = 0
+    if checkpoint_bytes:
+        state = _read_checkpoint(checkpoint_bytes, torch, target_device, signature)
+        model.load_state_dict(state["model_state"])
+        if state.get("optimizer_name", "adam") == "lbfgs":
+            optimizer.load_state_dict(state["optimizer_state"])
+            history = list(state.get("history", []))
+            first_epoch = int(state["epoch"])
+        else:
+            # Retain weights but initialise fresh L-BFGS state after a switch.
+            history = []
+            first_epoch = 0
+            checkpoint_bytes = _pack_checkpoint(
+                torch, model, optimizer, 0, signature, history, "lbfgs"
+            )
+    else:
+        checkpoint_bytes = _pack_checkpoint(
+            torch, model, optimizer, 0, signature, history, "lbfgs"
+        )
+
+    def collect(split):
+        batches = list(iter_prepared_batches(
+            source, preparation, split=split, separator=separator
+        ))
+        if not batches:
+            return None, None
+        x_np = np.concatenate([item[0] for item in batches], axis=0)
+        y_np = np.concatenate([item[1] for item in batches], axis=0)
+        return (
+            torch.as_tensor(x_np, dtype=torch.float32, device=target_device),
+            torch.as_tensor(y_np, dtype=torch.float32, device=target_device),
+        )
+
+    train_x, train_y = collect("train")
+    if train_x is None or len(train_x) == 0:
+        raise ValueError("The training split contains no usable rows.")
+    validation_x, validation_y = collect("validation")
+    if early_stopping_patience is not None and validation_x is None:
+        raise ValueError("Early stopping requires a non-empty validation split.")
+
+    def validation_loss():
+        if validation_x is None:
+            return None
+        model.eval()
+        with torch.no_grad():
+            return float(torch.nn.functional.mse_loss(
+                model(validation_x), validation_y
+            ).item())
+
+    latest = checkpoint_bytes
+    best_checkpoint = checkpoint_bytes
+    initial_validation_loss = validation_loss()
+    best_validation_loss = (
+        initial_validation_loss if initial_validation_loss is not None else float("inf")
+    )
+    best_epoch = first_epoch
+    no_improvement = 0
+    stopped_early = False
+    completed_epoch = first_epoch
+
+    for iteration in range(first_epoch + 1, first_epoch + epochs + 1):
+        model.train()
+
+        def closure():
+            optimizer.zero_grad(set_to_none=True)
+            loss = torch.nn.functional.mse_loss(model(train_x), train_y)
+            loss.backward()
+            return loss
+
+        optimizer.step(closure)
+        model.eval()
+        with torch.no_grad():
+            train_loss = float(torch.nn.functional.mse_loss(
+                model(train_x), train_y
+            ).item())
+        val_loss = validation_loss()
+        record = {
+            "epoch": iteration,
+            "training_loss": train_loss,
+            "validation_loss": val_loss,
+        }
+        history.append(record)
+        latest = _pack_checkpoint(
+            torch, model, optimizer, iteration, signature, history, "lbfgs"
+        )
+        completed_epoch = iteration
+        if val_loss is not None and val_loss < best_validation_loss:
+            best_validation_loss = val_loss
+            best_epoch = iteration
+            best_checkpoint = latest
+            no_improvement = 0
+        elif early_stopping_patience is not None and val_loss is not None:
+            no_improvement += 1
+        if on_epoch:
+            on_epoch({
+                **record, "checkpoint_bytes": latest,
+                "device": str(target_device),
+            })
+        if (
+            early_stopping_patience is not None
+            and val_loss is not None
+            and no_improvement >= early_stopping_patience
+        ):
+            stopped_early = True
+            break
+
+    selected = best_checkpoint if early_stopping_patience is not None else latest
+    return {
+        "checkpoint_bytes": selected or latest,
+        "history": pd.DataFrame(history),
+        "completed_epoch": completed_epoch,
+        "best_epoch": best_epoch if best_epoch > first_epoch else completed_epoch,
+        "best_validation_loss": (
+            best_validation_loss if best_validation_loss < float("inf") else None
+        ),
+        "stopped_early": stopped_early,
+        "device": str(target_device),
+    }
+
+
 def train_model(
     source: str | Path | BinaryIO,
     architecture: Architecture,
@@ -122,13 +264,35 @@ def train_model(
     *,
     epochs: int = 10,
     learning_rate: float = 0.001,
+    optimizer_name: str = "adam",
+    lbfgs_history_size: int = 50,
     checkpoint_bytes: bytes | None = None,
     separator: str = ",",
     device: str = "auto",
     early_stopping_patience: int | None = None,
     on_epoch: Callable[[dict], None] | None = None,
 ) -> dict:
-    """Train in mini-batches; optionally stop and restore the best validation epoch."""
+    """Train with Adam mini-batches or full-batch L-BFGS quasi-Newton."""
+    optimizer_name = optimizer_name.strip().lower().replace("-", "")
+    if optimizer_name in {"quasinewton", "l-bfgs", "lbfgs"}:
+        optimizer_name = "lbfgs"
+    if optimizer_name not in {"adam", "lbfgs"}:
+        raise ValueError("Choose Adam or L-BFGS (quasi-Newton).")
+    if optimizer_name == "lbfgs":
+        if epochs < 1 or lbfgs_history_size < 1:
+            raise ValueError("Iterations and L-BFGS history size must be positive.")
+        if tuple(architecture.input_columns) != preparation.input_columns:
+            raise ValueError("Network inputs do not match the prepared data.")
+        if tuple(architecture.target_columns) != preparation.target_columns:
+            raise ValueError("Network targets do not match the prepared data.")
+        if early_stopping_patience is not None and preparation.validation_fraction <= 0:
+            raise ValueError("Early stopping requires a non-empty validation split.")
+        return _train_lbfgs(
+            source, architecture, preparation, epochs=epochs,
+            checkpoint_bytes=checkpoint_bytes, separator=separator, device=device,
+            early_stopping_patience=early_stopping_patience, on_epoch=on_epoch,
+            history_size=lbfgs_history_size,
+        )
     if epochs < 1 or learning_rate <= 0:
         raise ValueError("Epochs and learning rate must be positive.")
     if early_stopping_patience is not None and early_stopping_patience < 1:
@@ -150,15 +314,32 @@ def train_model(
     if checkpoint_bytes:
         state = _read_checkpoint(checkpoint_bytes, torch, target_device, signature)
         model.load_state_dict(state["model_state"])
-        optimizer.load_state_dict(state["optimizer_state"])
+        if state.get("optimizer_name", "adam") == "adam":
+            optimizer.load_state_dict(state["optimizer_state"])
+            history = list(state.get("history", []))
+            first_epoch = int(state["epoch"])
+        else:
+            # Keep trained weights, but initialise fresh Adam state after a switch.
+            history = []
+            first_epoch = 0
+            checkpoint_bytes = _pack_checkpoint(
+                torch, model, optimizer, 0, signature, history, "adam"
+            )
         for parameter_group in optimizer.param_groups:
             parameter_group["lr"] = learning_rate
-        history = list(state.get("history", []))
-        first_epoch = int(state["epoch"])
+    else:
+        checkpoint_bytes = _pack_checkpoint(
+            torch, model, optimizer, 0, signature, history, "adam"
+        )
 
     latest = checkpoint_bytes
     best_checkpoint = checkpoint_bytes
-    best_validation_loss = float("inf")
+    initial_validation_loss = _validation_loss(
+        model, source, preparation, separator, torch, target_device
+    )
+    best_validation_loss = (
+        initial_validation_loss if initial_validation_loss is not None else float("inf")
+    )
     best_epoch = first_epoch
     epochs_without_improvement = 0
     stopped_early = False
@@ -191,7 +372,7 @@ def train_model(
             "validation_loss": validation_loss,
         }
         history.append(record)
-        latest = _pack_checkpoint(torch, model, optimizer, epoch, signature, history)
+        latest = _pack_checkpoint(torch, model, optimizer, epoch, signature, history, "adam")
         completed_epoch = epoch
         if validation_loss is not None and validation_loss < best_validation_loss:
             best_validation_loss = validation_loss

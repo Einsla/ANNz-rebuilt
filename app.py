@@ -54,6 +54,7 @@ def restore_project(zip_bytes: bytes) -> None:
         st.session_state["auto_tuned_architecture"] = config
     for key, value in (
         ("search_mode", optimisation.get("mode", "Automatic")),
+        ("search_optimizer", optimisation.get("optimizer", saved_training.get("optimizer", "adam"))),
         ("search_activations", optimisation.get("activations", ["leaky_relu", "relu"])),
         ("search_learning_rates", optimisation.get("learning_rates", [0.0003, 0.001])),
         ("search_architectures_text", optimisation.get("manual_layouts_text", "64\n128,64\n128,128")),
@@ -61,6 +62,7 @@ def restore_project(zip_bytes: bytes) -> None:
         ("search_patience", optimisation.get("patience", 10)),
         ("epochs", saved_training.get("additional_epochs", 10)),
         ("learning_rate", saved_training.get("learning_rate", 0.001)),
+        ("optimizer_name", saved_training.get("optimizer", "adam")),
         ("compute_device", saved_training.get("device", "auto")),
     ):
         st.session_state[key] = value
@@ -414,8 +416,8 @@ if architecture is not None and preparation is not None:
         "fresh weights; the test split is kept out of model selection."
     )
     st.caption(
-        "The search compares hidden-layer layouts, activation functions, and learning "
-        "rates. It uses Adam, validation MSE, and early stopping."
+        "Choose an optimiser, then compare hidden-layer layouts and activation functions "
+        "using validation MSE. Adam uses mini-batches; L-BFGS is a full-batch quasi-Newton method."
     )
     if preparation.validation_fraction <= 0:
         st.warning("Set a validation share above 0% in section 3 before running optimisation.")
@@ -427,6 +429,13 @@ if architecture is not None and preparation is not None:
             key="search_mode",
             help="Automatic generates a compact set of common layer layouts. Manual lets you specify each layout.",
         )
+        search_optimizer = st.selectbox(
+            "Optimisation method",
+            ["adam", "lbfgs"],
+            format_func=lambda value: "Adam (mini-batch gradient optimisation)" if value == "adam" else "L-BFGS (quasi-Newton)",
+            key="search_optimizer",
+            help="L-BFGS is a practical quasi-Newton alternative, not an exact port of the legacy ANNzPlus vmmin routine.",
+        )
         search_col1, search_col2 = st.columns(2)
         with search_col1:
             search_activations = st.multiselect(
@@ -435,13 +444,17 @@ if architecture is not None and preparation is not None:
                 default=["leaky_relu", "relu"],
                 key="search_activations",
             )
-            search_learning_rates = st.multiselect(
-                "Learning rates to compare",
-                [0.0001, 0.0003, 0.001, 0.003, 0.01],
-                default=[0.0003, 0.001],
-                key="search_learning_rates",
-                format_func=lambda value: f"{value:g}",
-            )
+            if search_optimizer == "adam":
+                search_learning_rates = st.multiselect(
+                    "Learning rates to compare",
+                    [0.0001, 0.0003, 0.001, 0.003, 0.01],
+                    default=[0.0003, 0.001],
+                    key="search_learning_rates",
+                    format_func=lambda value: f"{value:g}",
+                )
+            else:
+                search_learning_rates = [1.0]
+                st.caption("L-BFGS determines its step length internally; no Adam-style learning rate is required.")
         with search_col2:
             if search_mode == "Automatic":
                 automatic_layouts = [
@@ -479,14 +492,16 @@ if architecture is not None and preparation is not None:
                 for message in layout_errors:
                     st.error(message)
             search_epochs = st.number_input(
-                "Maximum epochs per candidate", 5, 300, 80, step=5,
-                key="search_epochs",
+                "Maximum epochs per candidate" if search_optimizer == "adam" else "Maximum L-BFGS iterations per candidate",
+                5, 300, 80, step=5, key="search_epochs",
             )
             search_patience = st.number_input(
                 "Early-stopping patience", 2, 40, 10, step=1,
                 key="search_patience",
-                help="Stop a candidate after this many epochs without validation-loss improvement.",
+                help="Stop a candidate after this many epochs (Adam) or iterations (L-BFGS) without validation-loss improvement.",
             )
+        if search_optimizer == "lbfgs" and device_choice == "cuda":
+            st.warning("L-BFGS evaluates the full training split together and can use substantial GPU memory. If CUDA runs out of memory, switch the compute device to CPU or use Adam.")
         if search_mode == "Automatic":
             layout_errors = []
             manual_layouts_text = ""
@@ -494,9 +509,9 @@ if architecture is not None and preparation is not None:
             len(parsed_layouts) * len(search_activations) * len(search_learning_rates)
         )
         st.caption(
-            f"Planned search: {len(parsed_layouts)} layouts × "
+            f"Planned {search_optimizer.upper()} search: {len(parsed_layouts)} layouts × "
             f"{len(search_activations)} activations × "
-            f"{len(search_learning_rates)} learning rates = {candidate_count} candidates."
+            f"{len(search_learning_rates)} optimiser settings = {candidate_count} candidates."
         )
         if candidate_count > 24:
             st.warning("Please reduce the search to 24 candidates or fewer to keep the run manageable.")
@@ -530,7 +545,8 @@ if architecture is not None and preparation is not None:
                     )
                     search_status.write(
                         f"Candidate {candidate_index + 1}/{len(candidates)}: "
-                        f"{activation_name}, layers {list(layout)}, learning rate {rate:g}"
+                        f"{activation_name}, layers {list(layout)}, "
+                        + (f"learning rate {rate:g}" if search_optimizer == "adam" else "L-BFGS quasi-Newton")
                     )
 
                     def candidate_progress(event):
@@ -553,6 +569,7 @@ if architecture is not None and preparation is not None:
                         preparation,
                         epochs=int(search_epochs),
                         learning_rate=rate,
+                        optimizer_name=search_optimizer,
                         separator=separator,
                         device=device_choice,
                         early_stopping_patience=int(search_patience),
@@ -562,7 +579,8 @@ if architecture is not None and preparation is not None:
                     candidate_rows.append({
                         "activation": activation_name,
                         "hidden_layers": str(list(layout)),
-                        "learning_rate": rate,
+                        "learning_rate": rate if search_optimizer == "adam" else None,
+                        "optimizer": search_optimizer,
                         "best_epoch": candidate_result["best_epoch"],
                         "epochs_run": candidate_result["completed_epoch"],
                         "validation_loss": score,
@@ -574,6 +592,7 @@ if architecture is not None and preparation is not None:
                             "architecture": candidate_architecture,
                             "result": candidate_result,
                             "learning_rate": rate,
+                            "optimizer": search_optimizer,
                         }
                     search_progress.progress((candidate_index + 1) / len(candidates))
                 if best_result is None:
@@ -589,18 +608,18 @@ if architecture is not None and preparation is not None:
                     "completed": True,
                     "mode": search_mode,
                     "activations": list(search_activations),
-                    "learning_rates": [float(value) for value in search_learning_rates],
+                    "learning_rates": [float(value) for value in search_learning_rates] if search_optimizer == "adam" else [],
                     "candidate_layouts": [list(layout) for layout in parsed_layouts],
                     "manual_layouts_text": (
                         search_architectures_text if search_mode == "Manual" else ""
                     ),
                     "max_epochs": int(search_epochs),
                     "patience": int(search_patience),
-                    "optimizer": "Adam",
+                    "optimizer": search_optimizer,
                     "selection_metric": "validation_mean_squared_error",
                     "best_validation_loss": float(best_score),
                     "best_epoch": int(best_training["best_epoch"]),
-                    "best_learning_rate": float(best_result["learning_rate"]),
+                    "best_learning_rate": float(best_result["learning_rate"]) if search_optimizer == "adam" else None,
                     "best_hidden_layers": list(best_architecture.hidden_layers),
                     "best_activation": best_architecture.activation,
                 }
@@ -611,10 +630,12 @@ if architecture is not None and preparation is not None:
                 )
                 st.session_state["training_history"] = best_training["history"]
                 st.session_state["last_epoch"] = best_training["completed_epoch"]
-                st.session_state["learning_rate"] = best_result["learning_rate"]
+                if search_optimizer == "adam":
+                    st.session_state["learning_rate"] = best_result["learning_rate"]
+                st.session_state["optimizer_name"] = search_optimizer
                 st.session_state["training_config"] = {
-                    "optimizer": "Adam",
-                    "learning_rate": float(best_result["learning_rate"]),
+                    "optimizer": search_optimizer,
+                    "learning_rate": float(best_result["learning_rate"]) if search_optimizer == "adam" else None,
                     "device": device_choice,
                     "additional_epochs": 10,
                     "optimisation": optimisation_config,
@@ -659,17 +680,34 @@ if architecture is not None and preparation is not None:
     st.session_state["checkpoint_signature"] = model_signature
 
     st.subheader("6. Train the network")
+    optimizer_choice = st.selectbox(
+        "Optimisation method", ["adam", "lbfgs"],
+        index=0 if st.session_state.get("optimizer_name", "adam") == "adam" else 1,
+        format_func=lambda value: "Adam" if value == "adam" else "L-BFGS (quasi-Newton)",
+        key="optimizer_name",
+        help="L-BFGS is a full-batch quasi-Newton implementation in PyTorch. It is conceptually similar to the legacy optimiser, but not bit-for-bit identical.",
+    )
     train_left, train_mid = st.columns(2)
     with train_left:
-        epochs = st.number_input("Additional epochs", 1, 500, 10, step=1, key="epochs")
-    with train_mid:
-        learning_rate = st.number_input(
-            "Learning rate", min_value=0.000001, max_value=1.0, value=0.001,
-            format="%.6f", key="learning_rate",
+        epochs = st.number_input(
+            "Additional epochs" if optimizer_choice == "adam" else "Additional L-BFGS iterations",
+            1, 500, 10, step=1, key="epochs",
         )
+    with train_mid:
+        if optimizer_choice == "adam":
+            learning_rate = st.number_input(
+                "Learning rate", min_value=0.000001, max_value=1.0, value=0.001,
+                format="%.6f", key="learning_rate",
+            )
+        else:
+            learning_rate = 1.0
+            st.caption("L-BFGS selects step lengths internally; the Adam learning-rate setting is not used.")
+    if optimizer_choice == "lbfgs" and device_choice == "cuda":
+        st.warning("L-BFGS holds the full training split on the selected device. If CUDA runs out of memory, switch to CPU or use Adam.")
     st.caption(
-        "Training rereads the source in bounded chunks. If a checkpoint exists, "
-        "training continues from its saved weights and optimizer state."
+        "Adam rereads the source in mini-batches. L-BFGS materializes the full training split. "
+        "When continuing with the same optimiser, its saved state is restored; switching optimisers "
+        "keeps the network weights but starts fresh optimiser state."
     )
     if st.button("Start / continue training", type="primary"):
         progress = st.progress(0)
@@ -681,7 +719,7 @@ if architecture is not None and preparation is not None:
             st.session_state["trained_checkpoint"] = event["checkpoint_bytes"]
             st.session_state["last_epoch"] = event["epoch"]
             status.write(
-                f"Epoch {event['epoch']}: training loss {event['training_loss']:.6g}; "
+                f"{'Epoch' if optimizer_choice == 'adam' else 'L-BFGS iteration'} {event['epoch']}: training loss {event['training_loss']:.6g}; "
                 f"validation loss {event['validation_loss'] if event['validation_loss'] is not None else 'not available'} "
                 f"({event['device']})"
             )
@@ -694,6 +732,7 @@ if architecture is not None and preparation is not None:
                 preparation,
                 epochs=int(epochs),
                 learning_rate=float(learning_rate),
+                optimizer_name=optimizer_choice,
                 checkpoint_bytes=st.session_state.get("trained_checkpoint"),
                 separator=separator,
                 device=device_choice,
@@ -704,8 +743,8 @@ if architecture is not None and preparation is not None:
             st.session_state["training_history"] = result["history"]
             st.session_state["training_config"] = {
                 **st.session_state.get("training_config", {}),
-                "optimizer": "Adam",
-                "learning_rate": float(learning_rate),
+                "optimizer": optimizer_choice,
+                "learning_rate": float(learning_rate) if optimizer_choice == "adam" else None,
                 "device": device_choice,
                 "additional_epochs": int(epochs),
             }
@@ -808,8 +847,8 @@ if st.button("Prepare project ZIP"):
             training_history=st.session_state.get("training_history"),
             training_config={
                 **st.session_state.get("training_config", {}),
-                "optimizer": "Adam",
-                "learning_rate": float(st.session_state.get("learning_rate", 0.001)),
+                "optimizer": st.session_state.get("optimizer_name", "adam"),
+                "learning_rate": float(st.session_state.get("learning_rate", 0.001)) if st.session_state.get("optimizer_name", "adam") == "adam" else None,
                 "device": st.session_state.get("compute_device", "auto"),
                 "additional_epochs": int(st.session_state.get("epochs", 10)),
             },
@@ -824,8 +863,8 @@ if st.button("Prepare project ZIP"):
             training_history=st.session_state.get("training_history"),
             training_config={
                 **st.session_state.get("training_config", {}),
-                "optimizer": "Adam",
-                "learning_rate": float(st.session_state.get("learning_rate", 0.001)),
+                "optimizer": st.session_state.get("optimizer_name", "adam"),
+                "learning_rate": float(st.session_state.get("learning_rate", 0.001)) if st.session_state.get("optimizer_name", "adam") == "adam" else None,
                 "device": st.session_state.get("compute_device", "auto"),
                 "additional_epochs": int(st.session_state.get("epochs", 10)),
             },

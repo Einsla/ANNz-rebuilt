@@ -12,13 +12,15 @@ This Streamlit application runs on your computer. Install the dependencies and s
 3. Analyze the catalogue to review invalid values, summary statistics, and exploratory correlations.
 4. Prepare deterministic training, validation, and test splits. Invalid rows are excluded; input and target scaling is fitted from training rows only.
 5. Configure a manual network, or choose **Automatic** in the optimisation section to generate candidate hidden-layer layouts. Choose **Manual** if you want to supply your own layouts.
-6. Compare layouts, activation functions, and learning rates. Each candidate starts from fresh weights, is ranked using validation loss, and uses early stopping. The search is capped at 24 candidates.
-7. Train or continue the selected network in mini-batches, if desired.
+6. Choose Adam or L-BFGS (quasi-Newton), then compare layouts and activation functions. Adam candidates can also compare learning rates. Each candidate starts from fresh weights, is ranked using validation loss, and uses early stopping. The search is capped at 24 candidates.
+7. Train or continue the selected network with the chosen optimiser. Adam uses mini-batches and epochs; L-BFGS uses full-batch optimisation iterations.
 8. Evaluate on the validation or test split using MAE, RMSE, predictive Q-squared, R-squared, and the ANNz+ photo-z metrics when the target is a recognised redshift column.
 9. Upload a catalogue with the selected input columns to write predictions as a CSV.
 10. Download a reusable settings ZIP or a full project ZIP.
 
 **Important:** Use validation results for model selection. Keep the test split for the final assessment after the architecture and hyperparameters have been chosen. The optimiser does not inspect the test split.
+
+Optimisers: Adam is the default mini-batch optimiser and uses a learning-rate setting. L-BFGS is a full-batch quasi-Newton option; it chooses step lengths internally and therefore does not use the Adam learning-rate field. L-BFGS can require substantially more memory because it evaluates the full training split together. If CUDA runs out of memory, select CPU or use Adam with mini-batches. The L-BFGS implementation is PyTorch's implementation and is conceptually similar to, but not an exact reproduction of, legacy ANNzPlus vmmin().
 
 PyTorch chooses a CUDA GPU when one is available in the Python environment. The CPU can be selected as a fallback.
 
@@ -28,8 +30,8 @@ Choose **Download reusable settings ZIP** to save a portable configuration witho
 
 - Winning architecture: input/target columns, hidden-layer layout, and activation.
 - Data-preparation settings: split fractions, random seed, batch sizes, and training-only scaling values.
-- Training settings: optimizer, learning rate, compute-device preference, and epoch setting.
-- Optimisation recipe: automatic/manual mode, candidate layouts, activations, learning rates, maximum epochs, early-stopping patience, and validation-based selection metric.
+- Training settings: optimiser, learning rate when applicable, compute-device preference, and epoch/iteration setting.
+- Optimisation recipe: automatic/manual mode, selected optimiser, candidate layouts, activations, learning rates when using Adam, maximum epochs/iterations, early-stopping patience, and validation-based selection metric.
 - Ranked optimisation results, training history, and the model checkpoint when available.
 - Original catalogue filename and SHA-256 fingerprint, but not the catalogue itself.
 
