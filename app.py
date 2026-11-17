@@ -54,14 +54,17 @@ def restore_project(zip_bytes: bytes) -> None:
     st.session_state["training_config"] = saved_training
     st.session_state["auto_tuning_results"] = project.optimisation_results
     optimisation = saved_training.get("optimisation", {})
+    saved_optimizer = saved_training.get("optimizer", "adam")
+    if saved_optimizer == "lbfgs":
+        saved_optimizer = "vmmin"
+    saved_search_optimizer = optimisation.get("optimizer", saved_optimizer)
+    if saved_search_optimizer == "lbfgs":
+        saved_search_optimizer = "vmmin"
     if optimisation.get("completed"):
         st.session_state["auto_tuned_architecture"] = config
     for key, value in (
         ("search_mode", optimisation.get("mode", "Automatic")),
-        (
-            "search_optimizer",
-            optimisation.get("optimizer", saved_training.get("optimizer", "adam")),
-        ),
+        ("search_optimizer", saved_search_optimizer),
         ("search_activations", optimisation.get("activations", ["leaky_relu", "relu"])),
         ("search_learning_rates", optimisation.get("learning_rates", [0.0003, 0.001])),
         (
@@ -72,7 +75,7 @@ def restore_project(zip_bytes: bytes) -> None:
         ("search_patience", optimisation.get("patience", 10)),
         ("epochs", saved_training.get("additional_epochs", 10)),
         ("learning_rate", saved_training.get("learning_rate", 0.001)),
-        ("optimizer_name", saved_training.get("optimizer", "adam")),
+        ("optimizer_name", saved_optimizer),
         ("compute_device", saved_training.get("device", "auto")),
     ):
         st.session_state[key] = value
@@ -460,7 +463,7 @@ if architecture is not None and preparation is not None:
     )
     st.caption(
         "Choose an optimiser, then compare hidden-layer layouts and activation functions "
-        "using validation MSE. Adam uses mini-batches; L-BFGS is a full-batch quasi-Newton method."
+        "using validation loss. Adam updates weights with mini-batches; legacy vmmin uses the full training-set objective and gradient, streamed from disk in chunks."
     )
     if preparation.validation_fraction <= 0:
         st.warning(
@@ -476,21 +479,23 @@ if architecture is not None and preparation is not None:
         )
         search_optimizer = st.selectbox(
             "Optimisation method",
-            ["adam", "lbfgs"],
+            ["adam", "vmmin"],
             format_func=lambda value: (
                 "Adam (mini-batch gradient optimisation)"
                 if value == "adam"
-                else "L-BFGS (quasi-Newton)"
+                else "Legacy ANNzPlus vmmin (variable-metric quasi-Newton)"
             ),
             key="search_optimizer",
-            help="L-BFGS is a practical quasi-Newton alternative, not an exact port of the legacy ANNzPlus vmmin routine.",
+            help="Uses the variable-metric update, line search, reset rules and weight-decay schedule in the original ANNzPlus Tanh/train.cpp.",
         )
+        if search_optimizer == "vmmin":
+            st.session_state["search_activations"] = ["tanh"]
         search_col1, search_col2 = st.columns(2)
         with search_col1:
             search_activations = st.multiselect(
                 "Activation functions to compare",
-                sorted(SUPPORTED_ACTIVATIONS),
-                default=["leaky_relu", "relu"],
+                (["tanh"] if search_optimizer == "vmmin" else sorted(SUPPORTED_ACTIVATIONS)),
+                default=(["tanh"] if search_optimizer == "vmmin" else ["leaky_relu", "relu"]),
                 key="search_activations",
             )
             if search_optimizer == "adam":
@@ -504,7 +509,7 @@ if architecture is not None and preparation is not None:
             else:
                 search_learning_rates = [1.0]
                 st.caption(
-                    "L-BFGS determines its step length internally; no Adam-style learning rate is required."
+                    "legacy vmmin determines its step length internally; no Adam-style learning rate is required."
                 )
         with search_col2:
             if search_mode == "Automatic":
@@ -557,29 +562,50 @@ if architecture is not None and preparation is not None:
             search_epochs = st.number_input(
                 "Maximum epochs per candidate"
                 if search_optimizer == "adam"
-                else "Maximum L-BFGS iterations per candidate",
+                else "Maximum legacy vmmin iterations per candidate",
                 5,
                 300,
                 80,
                 step=5,
                 key="search_epochs",
             )
-            search_patience = st.number_input(
-                "Early-stopping patience",
-                2,
-                40,
-                10,
-                step=1,
-                key="search_patience",
-                help="Stop a candidate after this many epochs (Adam) or iterations (L-BFGS) without validation-loss improvement.",
-            )
-        if search_optimizer == "lbfgs" and device_choice == "cuda":
+            if search_optimizer == "adam":
+                search_patience = st.number_input(
+                    "Early-stopping patience",
+                    2,
+                    40,
+                    10,
+                    step=1,
+                    key="search_patience",
+                    help="Stop an Adam candidate after this many epochs without validation-loss improvement.",
+                )
+            else:
+                search_patience = None
+                st.caption("Legacy vmmin uses its original objective and convergence rules; validation patience is not applied.")
+        if search_optimizer == "vmmin":
             st.warning(
-                "L-BFGS evaluates the full training split together and can use substantial GPU memory. If CUDA runs out of memory, switch the compute device to CPU or use Adam."
+                "Legacy vmmin uses a dense inverse-Hessian matrix in CPU memory (quadratic in the number of network weights). Very large networks may exceed its safety limit; use a smaller network or Adam."
             )
         if search_mode == "Automatic":
             layout_errors = []
         parsed_layouts = list(dict.fromkeys(parsed_layouts))
+        if search_optimizer == "vmmin":
+            def vmmin_parameter_count(layout):
+                widths = [len(inputs), *layout, len(targets)]
+                return sum((left + 1) * right for left, right in zip(widths[:-1], widths[1:]))
+            rejected_layouts = [
+                layout for layout in parsed_layouts
+                if vmmin_parameter_count(layout) > 5000
+            ]
+            parsed_layouts = [
+                layout for layout in parsed_layouts
+                if vmmin_parameter_count(layout) <= 5000
+            ]
+            if rejected_layouts:
+                st.warning(
+                    "Skipped vmmin layouts exceeding 5,000 weights (dense inverse-Hessian memory limit): "
+                    + ", ".join(str(list(layout)) for layout in rejected_layouts)
+                )
         search_step_label = "epoch" if search_optimizer == "adam" else "iteration"
         candidate_count = (
             len(parsed_layouts) * len(search_activations) * len(search_learning_rates)
@@ -629,7 +655,7 @@ if architecture is not None and preparation is not None:
                         + (
                             f"learning rate {rate:g}"
                             if search_optimizer == "adam"
-                            else "L-BFGS quasi-Newton"
+                            else "legacy vmmin quasi-Newton"
                         )
                     )
 
@@ -660,7 +686,7 @@ if architecture is not None and preparation is not None:
                         optimizer_name=search_optimizer,
                         separator=separator,
                         device=device_choice,
-                        early_stopping_patience=int(search_patience),
+                        early_stopping_patience=(int(search_patience) if search_optimizer == "adam" else None),
                         on_epoch=candidate_progress,
                     )
                     score = candidate_result["best_validation_loss"]
@@ -708,7 +734,7 @@ if architecture is not None and preparation is not None:
                         search_architectures_text if search_mode == "Manual" else ""
                     ),
                     "max_epochs": int(search_epochs),
-                    "patience": int(search_patience),
+                    "patience": int(search_patience) if search_patience is not None else None,
                     "optimizer": search_optimizer,
                     "selection_metric": "validation_mean_squared_error",
                     "best_validation_loss": float(best_score),
@@ -788,20 +814,20 @@ if architecture is not None and preparation is not None:
     st.subheader("6. Train the network")
     optimizer_choice = st.selectbox(
         "Optimisation method",
-        ["adam", "lbfgs"],
+        ["adam", "vmmin"],
         index=0 if st.session_state.get("optimizer_name", "adam") == "adam" else 1,
         format_func=lambda value: (
-            "Adam" if value == "adam" else "L-BFGS (quasi-Newton)"
+            "Adam" if value == "adam" else "Legacy ANNzPlus vmmin (variable-metric quasi-Newton)"
         ),
         key="optimizer_name",
-        help="L-BFGS is a full-batch quasi-Newton implementation in PyTorch. It is conceptually similar to the legacy optimiser, but not bit-for-bit identical.",
+        help="Faithful Python translation of the original ANNzPlus Tanh/train.cpp variable-metric routine; it uses a dense inverse-Hessian approximation.",
     )
     train_left, train_mid = st.columns(2)
     with train_left:
         epochs = st.number_input(
             "Additional epochs"
             if optimizer_choice == "adam"
-            else "Additional L-BFGS iterations",
+            else "Additional legacy vmmin iterations",
             1,
             500,
             10,
@@ -821,23 +847,29 @@ if architecture is not None and preparation is not None:
         else:
             learning_rate = 1.0
             st.caption(
-                "L-BFGS selects step lengths internally; the Adam learning-rate setting is not used."
+                "legacy vmmin selects step lengths internally; the Adam learning-rate setting is not used."
             )
-    if optimizer_choice == "lbfgs" and device_choice == "cuda":
+    if optimizer_choice == "vmmin":
         st.warning(
-            "L-BFGS holds the full training split on the selected device. If CUDA runs out of memory, switch to CPU or use Adam."
+            "Legacy vmmin stores a dense inverse-Hessian approximation in CPU memory. Large networks may exceed its safety limit; use a smaller network or Adam."
         )
+        if architecture.activation != "tanh":
+            st.error("The original Tanh/train.cpp vmmin implementation requires tanh hidden-layer activations. Change the activation in section 4.")
     st.caption(
-        "Adam rereads the source in mini-batches. L-BFGS materializes the full training split. "
+        "Adam updates weights after each mini-batch. Legacy vmmin evaluates the full training objective and gradient by streaming chunks; its dense inverse-Hessian matrix uses O(weights?) CPU memory. "
         "When continuing with the same optimiser, its saved state is restored; switching optimisers "
         "keeps the network weights but starts fresh optimiser state."
     )
-    if st.button("Start / continue training", type="primary"):
+    if st.button(
+        "Start / continue training",
+        type="primary",
+        disabled=(optimizer_choice == "vmmin" and architecture.activation != "tanh"),
+    ):
         progress = st.progress(0)
         status = st.empty()
         progress_state = {"steps_this_run": 0}
         training_step_label = (
-            "epoch" if optimizer_choice == "adam" else "L-BFGS iteration"
+            "epoch" if optimizer_choice == "adam" else "legacy vmmin iteration"
         )
 
         def update_progress(event):
@@ -845,7 +877,7 @@ if architecture is not None and preparation is not None:
             st.session_state["trained_checkpoint"] = event["checkpoint_bytes"]
             st.session_state["last_epoch"] = event["epoch"]
             status.write(
-                f"{'Epoch' if optimizer_choice == 'adam' else 'L-BFGS iteration'} {event['epoch']}: training loss {event['training_loss']:.6g}; "
+                f"{'Epoch' if optimizer_choice == 'adam' else 'legacy vmmin iteration'} {event['epoch']}: {'training loss' if optimizer_choice == 'adam' else 'training objective'} {event['training_loss']:.6g}; "
                 f"validation loss {event['validation_loss'] if event['validation_loss'] is not None else 'not available'} "
                 f"({event['device']})"
             )
@@ -891,7 +923,7 @@ if architecture is not None and preparation is not None:
         st.markdown("**Training history**")
         st.dataframe(history, hide_index=True, use_container_width=True)
         st.caption(
-            "The horizontal axis is an epoch for Adam or an optimisation iteration for L-BFGS."
+            "The horizontal axis is an epoch for Adam or an optimisation iteration for legacy vmmin."
         )
         st.line_chart(history.set_index("epoch")[["training_loss", "validation_loss"]])
 

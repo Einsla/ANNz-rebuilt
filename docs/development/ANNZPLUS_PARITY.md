@@ -28,7 +28,7 @@ The upstream repository contains one implementation directory per activation fun
 - Chunked catalogue analysis, row validation, deterministic train/validation/test split assignment, and scaling fitted on training rows only.
 - Fully connected PyTorch regression network with bias terms, configurable hidden-layer widths, seven activation choices and linear outputs.
 - **Adam:** mini-batch training with a user-selected learning rate. Mini-batches are shuffled within source chunks with a deterministic epoch-specific seed.
-- **L-BFGS:** PyTorch full-batch quasi-Newton training with a strong-Wolfe line search. This is conceptually similar to, but not an exact reproduction of, the C++ `vmmin()` optimiser.
+- **legacy vmmin:** A Python translation of the original dense variable-metric update, line-search acceptance, reset rules and periodic weight-decay hyperparameter update in Tanh/train.cpp.
 - Validation MSE is monitored during training. Automatic architecture search ranks candidates by validation loss and supports early stopping; the test split is not used for model selection.
 - Checkpoints preserve model weights, optimiser state, epoch history and a signature of the architecture/data-preparation settings.
 - Prediction export is chunked and limits inference batch size on the selected device.
@@ -39,7 +39,7 @@ The upstream repository contains one implementation directory per activation fun
 
 1. Python fits scaling on training rows only to avoid validation leakage. The C++ code calculates its normalization using both training and validation rows.
 2. Python currently does not include the C++ weight-decay term.
-3. Python offers Adam and PyTorch L-BFGS; it does not reproduce the exact legacy `vmmin()` implementation or all of its stopping/step-selection details.
+3. Python now ports the legacy vmmin update and line-search procedure. End-to-end parity still depends on matching data normalisation, weight initialisation, objective conventions and floating-point execution.
 4. Python uses named CSV/TSV columns rather than the original whitespace-delimited ANNz+ record format.
 5. Input measurement-error columns are not yet used for uncertainty propagation.
 6. Committee inference, committee scatter, and propagated input-error estimates are not yet implemented.
@@ -72,3 +72,46 @@ The optimisation objective is mean squared error in the scaled target space. The
 3. Implement and validate the legacy weight-decay objective and compare it with the Python objective.
 4. Compare normalization and activation outputs/derivatives against C++ using controlled fixtures.
 5. Run matched train/validation/test catalogues and report prediction and uncertainty differences. A successful import or training run alone does not demonstrate scientific equivalence.
+
+
+## Legacy vmmin Python port (feature branch)
+
+The Python implementation ports the algorithm in Tanh/train.cpp rather than
+using torch.optim.LBFGS. The translated procedure includes:
+
+- Dense symmetric inverse-Hessian approximation, initialised to identity.
+- Search direction -Gg and the original step acceptance test (acctol=1e-4).
+- Step-length backtracking by 0.2.
+- The source's weight-change test (reltest=10), objective tolerances, reset
+  behaviour and periodic reset after more than 2 * number_of_weights steps.
+- The lower-triangle BFGS inverse-Hessian update.
+- The original periodic (every >29 accepted iterations) "quick and dirty"
+  weight-decay update: alpha = number_of_weights / sum(weights**2) and
+  beta = number_of_training_rows / sum_squared_training_residuals.
+
+The objective and gradient are
+E = 0.5 * beta * sum_squared_residuals + 0.5 * alpha * sum(weights**2) and
+grad(E) = 0.5 * beta * grad(sum_squared_residuals) + alpha * weights.
+The implementation uses PyTorch autograd for network derivatives and NumPy
+float64 for the legacy dense variable-metric matrix.
+
+### Important constraints and parity gaps
+
+- This is a port of the Tanh implementation. The UI restricts vmmin architecture
+  search to tanh hidden activations. Adam retains all supported activations.
+- The inverse-Hessian approximation is dense, requiring O(P**2) CPU memory for
+  P network weights. A safety limit prevents excessive matrix allocation.
+  Adam is recommended for larger networks.
+- Training rows are streamed in bounded chunks for each complete objective and
+  gradient evaluation. This is not mini-batch optimisation: weights change
+  only after a full training-set objective/gradient has been evaluated.
+- Legacy vmmin uses its own convergence/reset rules; validation loss is
+  recorded for model selection but does not drive patience-based early stopping.
+- Python data preparation currently fits scaling on training rows, while C++
+  normalise() computes normalisation using both training and validation sets.
+  Initial weight generation and floating-point execution also differ.
+  Therefore this is an algorithm/objective port, not end-to-end parity.
+- The periodic hyperparameter update changes the objective during optimisation;
+  this behaviour is retained, including objective reevaluation.
+- Existing pre-port quasi-Newton checkpoints remain readable for model weights, but continuing
+  with vmmin starts a fresh variable-metric state.

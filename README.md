@@ -47,7 +47,7 @@ For development:
 4. Prepare deterministic training, validation, and test splits. Invalid selected rows are excluded, and scaling is fitted on training rows only.
 5. Describe the network by choosing hidden-layer widths and an activation function.
 6. Optimise candidate architectures using validation loss. Automatic and manual candidate layouts are supported.
-7. Train or continue with Adam mini-batches or full-batch L-BFGS. Validation loss is monitored for candidate selection and early stopping.
+7. Train or continue with Adam mini-batches or legacy vmmin. Validation loss ranks candidate networks; patience-based early stopping applies to Adam, while vmmin follows its own legacy convergence rules.
 8. Evaluate using MAE, RMSE, predictive Q-squared, R-squared, and ANNz+ photo-z metrics for recognised redshift targets.
 9. Generate predictions for another catalogue and export them as CSV.
 10. Save a reusable settings ZIP or a full project ZIP with optional source data.
@@ -56,8 +56,10 @@ The test split is held out from architecture and hyperparameter selection. It sh
 
 ## Optimisers
 
-- **Adam:** mini-batch gradient optimisation with an explicit learning-rate setting. Each epoch passes through the full training split; batches are shuffled within source chunks using a reproducible epoch-specific seed.
-- **L-BFGS:** full-batch quasi-Newton optimisation with an internal line search. It materialises the training and validation splits and can require substantially more memory. It is conceptually similar to the legacy ANNzPlus variable-metric optimiser, but it is not an exact port of the original `vmmin()` implementation.
+- **Adam:** mini-batch gradient optimisation with an explicit learning-rate setting. Each epoch passes through the full training split.
+- **Legacy vmmin:** Python port of the original ANNzPlus Tanh/train.cpp variable-metric optimiser, including its dense inverse-Hessian update, line search, reset rules and periodic weight-decay update. It uses the full training-set objective and gradient but streams the catalogue in chunks between evaluations. It is restricted to tanh hidden activations and has O(number_of_weights**2) CPU-memory cost. Use smaller networks; Adam is recommended for larger catalogues or architectures.
+
+The vmmin port is not yet end-to-end scientific parity: data normalisation, random initialisation and floating-point execution still differ from C++. See the parity assessment in docs/development/ANNZPLUS_PARITY.md.
 
 ## Repository map
 

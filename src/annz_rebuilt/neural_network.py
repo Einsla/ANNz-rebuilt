@@ -88,20 +88,21 @@ def _pack_checkpoint(
     signature: str,
     history: list[dict],
     optimizer_name: str = "adam",
+    extra_state: dict | None = None,
 ) -> bytes:
     buffer = io.BytesIO()
-    torch.save(
-        {
+    state = {
             "format_version": 1,
             "epoch": epoch,
             "signature": signature,
             "model_state": model.state_dict(),
-            "optimizer_state": optimizer.state_dict(),
+            "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
             "optimizer_name": optimizer_name,
             "history": history,
-        },
-        buffer,
-    )
+        }
+    if extra_state:
+        state.update(extra_state)
+    torch.save(state, buffer)
     return buffer.getvalue()
 
 
@@ -126,168 +127,12 @@ def _validation_loss(
         ):
             if not len(x_np):
                 continue
-            x = torch.as_tensor(x_np, dtype=torch.float32, device=device)
-            y = torch.as_tensor(y_np, dtype=torch.float32, device=device)
+            parameter_dtype = next(model.parameters()).dtype
+            x = torch.as_tensor(x_np, dtype=parameter_dtype, device=device)
+            y = torch.as_tensor(y_np, dtype=parameter_dtype, device=device)
             total += torch.square(model(x) - y).sum().item()
             rows += len(x_np)
     return total / (rows * len(preparation.target_columns)) if rows else None
-
-
-def _train_lbfgs(
-    source,
-    architecture,
-    preparation,
-    *,
-    epochs,
-    checkpoint_bytes,
-    separator,
-    device,
-    early_stopping_patience,
-    on_epoch,
-    history_size,
-):
-    """Train with full-batch L-BFGS (a quasi-Newton method).
-
-    This is a PyTorch L-BFGS implementation, not a bit-for-bit port of the
-    legacy ANNzPlus vmmin routine. L-BFGS needs a consistent full-batch
-    objective, so this path materializes the train and validation splits.
-    """
-    torch, _ = _torch()
-    target_device = _device(torch, device)
-    torch.manual_seed(preparation.random_seed)
-    model = build_network(architecture).to(target_device)
-    optimizer = torch.optim.LBFGS(
-        model.parameters(),
-        lr=1.0,
-        max_iter=1,
-        history_size=history_size,
-        line_search_fn="strong_wolfe",
-    )
-    signature = _signature(architecture, preparation)
-    history = []
-    first_epoch = 0
-    if checkpoint_bytes:
-        state = _read_checkpoint(checkpoint_bytes, torch, target_device, signature)
-        model.load_state_dict(state["model_state"])
-        if state.get("optimizer_name", "adam") == "lbfgs":
-            optimizer.load_state_dict(state["optimizer_state"])
-            history = list(state.get("history", []))
-            first_epoch = int(state["epoch"])
-        else:
-            # Retain weights but initialise fresh L-BFGS state after a switch.
-            history = []
-            first_epoch = 0
-            checkpoint_bytes = _pack_checkpoint(
-                torch, model, optimizer, 0, signature, history, "lbfgs"
-            )
-    else:
-        checkpoint_bytes = _pack_checkpoint(
-            torch, model, optimizer, 0, signature, history, "lbfgs"
-        )
-
-    def collect(split):
-        batches = list(
-            iter_prepared_batches(source, preparation, split=split, separator=separator)
-        )
-        if not batches:
-            return None, None
-        x_np = np.concatenate([item[0] for item in batches], axis=0)
-        y_np = np.concatenate([item[1] for item in batches], axis=0)
-        return (
-            torch.as_tensor(x_np, dtype=torch.float32, device=target_device),
-            torch.as_tensor(y_np, dtype=torch.float32, device=target_device),
-        )
-
-    train_x, train_y = collect("train")
-    if train_x is None or len(train_x) == 0:
-        raise ValueError("The training split contains no usable rows.")
-    validation_x, validation_y = collect("validation")
-    if early_stopping_patience is not None and validation_x is None:
-        raise ValueError("Early stopping requires a non-empty validation split.")
-
-    def validation_loss():
-        if validation_x is None:
-            return None
-        model.eval()
-        with torch.no_grad():
-            return float(
-                torch.nn.functional.mse_loss(model(validation_x), validation_y).item()
-            )
-
-    latest = checkpoint_bytes
-    best_checkpoint = checkpoint_bytes
-    initial_validation_loss = validation_loss()
-    best_validation_loss = (
-        initial_validation_loss if initial_validation_loss is not None else float("inf")
-    )
-    best_epoch = first_epoch
-    no_improvement = 0
-    stopped_early = False
-    completed_epoch = first_epoch
-
-    for iteration in range(first_epoch + 1, first_epoch + epochs + 1):
-        model.train()
-
-        def closure():
-            optimizer.zero_grad(set_to_none=True)
-            loss = torch.nn.functional.mse_loss(model(train_x), train_y)
-            loss.backward()
-            return loss
-
-        optimizer.step(closure)
-        model.eval()
-        with torch.no_grad():
-            train_loss = float(
-                torch.nn.functional.mse_loss(model(train_x), train_y).item()
-            )
-        val_loss = validation_loss()
-        record = {
-            "epoch": iteration,
-            "training_loss": train_loss,
-            "validation_loss": val_loss,
-        }
-        history.append(record)
-        latest = _pack_checkpoint(
-            torch, model, optimizer, iteration, signature, history, "lbfgs"
-        )
-        completed_epoch = iteration
-        if val_loss is not None and val_loss < best_validation_loss:
-            best_validation_loss = val_loss
-            best_epoch = iteration
-            best_checkpoint = latest
-            no_improvement = 0
-        elif early_stopping_patience is not None and val_loss is not None:
-            no_improvement += 1
-        if on_epoch:
-            on_epoch(
-                {
-                    **record,
-                    "checkpoint_bytes": latest,
-                    "device": str(target_device),
-                }
-            )
-        if (
-            early_stopping_patience is not None
-            and val_loss is not None
-            and no_improvement >= early_stopping_patience
-        ):
-            stopped_early = True
-            break
-
-    selected = best_checkpoint if early_stopping_patience is not None else latest
-    return {
-        "checkpoint_bytes": selected or latest,
-        "history": pd.DataFrame(history),
-        "completed_epoch": completed_epoch,
-        "best_epoch": (
-            best_epoch if best_validation_loss < float("inf") else completed_epoch
-        ),
-        "best_validation_loss": (
-            best_validation_loss if best_validation_loss < float("inf") else None
-        ),
-        "stopped_early": stopped_early,
-        "device": str(target_device),
-    }
 
 
 def train_model(
@@ -298,31 +143,28 @@ def train_model(
     epochs: int = 10,
     learning_rate: float = 0.001,
     optimizer_name: str = "adam",
-    lbfgs_history_size: int = 50,
     checkpoint_bytes: bytes | None = None,
     separator: str = ",",
     device: str = "auto",
     early_stopping_patience: int | None = None,
     on_epoch: Callable[[dict], None] | None = None,
 ) -> dict:
-    """Train with Adam mini-batches or full-batch L-BFGS quasi-Newton."""
+    """Train with mini-batch Adam or the legacy ANNzPlus vmmin optimiser."""
     optimizer_name = optimizer_name.strip().lower().replace("-", "")
-    if optimizer_name in {"quasinewton", "lbfgs"}:
-        optimizer_name = "lbfgs"
-    if optimizer_name not in {"adam", "lbfgs"}:
-        raise ValueError("Choose Adam or L-BFGS (quasi-Newton).")
+    if optimizer_name in {"quasinewton", "lbfgs", "legacy_vmmin"}:
+        optimizer_name = "vmmin"
+    if optimizer_name not in {"adam", "vmmin"}:
+        raise ValueError("Choose Adam or legacy vmmin (quasi-Newton).")
     if early_stopping_patience is not None and early_stopping_patience < 1:
         raise ValueError("Early-stopping patience must be at least one.")
-    if optimizer_name == "lbfgs":
-        if epochs < 1 or lbfgs_history_size < 1:
-            raise ValueError("Iterations and L-BFGS history size must be positive.")
+    if optimizer_name == "vmmin":
+        if epochs < 1:
+            raise ValueError("Maximum vmmin iterations must be positive.")
         if tuple(architecture.input_columns) != preparation.input_columns:
             raise ValueError("Network inputs do not match the prepared data.")
         if tuple(architecture.target_columns) != preparation.target_columns:
             raise ValueError("Network targets do not match the prepared data.")
-        if early_stopping_patience is not None and preparation.validation_fraction <= 0:
-            raise ValueError("Early stopping requires a non-empty validation split.")
-        return _train_lbfgs(
+        return _train_vmmin(
             source,
             architecture,
             preparation,
@@ -332,7 +174,6 @@ def train_model(
             device=device,
             early_stopping_patience=early_stopping_patience,
             on_epoch=on_epoch,
-            history_size=lbfgs_history_size,
         )
     if epochs < 1 or not np.isfinite(learning_rate) or learning_rate <= 0:
         raise ValueError("Epochs and learning rate must be positive and finite.")
@@ -642,4 +483,131 @@ def write_predictions_csv(
         "path": str(output.resolve()),
         "predicted_rows": written,
         "skipped_rows": offset - written,
+    }
+def _train_vmmin(
+    source,
+    architecture,
+    preparation,
+    *,
+    epochs,
+    checkpoint_bytes,
+    separator,
+    device,
+    early_stopping_patience,
+    on_epoch,
+):
+    """Train using the original ANNzPlus variable-metric algorithm.
+
+    The legacy optimiser is full-objective, not mini-batch SGD. Source data is
+    reread in bounded chunks for each objective and gradient evaluation.
+    """
+    from .vmmin_training import train_with_vmmin
+
+    torch, _ = _torch()
+    target_device = _device(torch, device)
+    torch.manual_seed(preparation.random_seed)
+    model = build_network(architecture).to(target_device).double()
+    signature = _signature(architecture, preparation)
+    history = []
+    previous_iterations = 0
+    initial_alpha = 1.0
+    initial_beta = 1.0
+    if checkpoint_bytes:
+        state = _read_checkpoint(checkpoint_bytes, torch, target_device, signature)
+        model.load_state_dict(state["model_state"])
+        history = list(state.get("history", []))
+        previous_iterations = int(state.get("epoch", 0))
+        if state.get("optimizer_name") == "vmmin":
+            initial_alpha = float(state.get("vmmin_alpha", 1.0))
+            initial_beta = float(state.get("vmmin_beta", 1.0))
+    initial_weights = np.concatenate(
+        [p.detach().cpu().numpy().reshape(-1) for p in model.parameters()]
+    ).astype(np.float64)
+
+    # vmmin is a full-objective optimiser. Patience-based early stopping is not
+    # part of the original C++ algorithm; validation RMS is tracked for model
+    # selection, but it does not alter the optimiser's trajectory.
+    if early_stopping_patience is not None:
+        raise ValueError(
+            "Legacy vmmin follows its own objective/convergence rules and does "
+            "not use validation-loss patience. Disable early stopping for vmmin."
+        )
+
+    latest = checkpoint_bytes
+    initial_validation_loss = _validation_loss(
+        model, source, preparation, separator, torch, target_device
+    )
+    best_validation_loss = (
+        initial_validation_loss if initial_validation_loss is not None else float("inf")
+    )
+    best_iteration = previous_iterations
+    best_checkpoint = _pack_checkpoint(
+        torch, model, None, previous_iterations, signature, history, "vmmin",
+        {"vmmin_alpha": initial_alpha, "vmmin_beta": initial_beta},
+    )
+    latest = best_checkpoint
+
+    def callback(index, weights, objective_value):
+        nonlocal latest, best_checkpoint, best_validation_loss, best_iteration
+        iteration = previous_iterations + index
+        validation_loss = _validation_loss(
+            model, source, preparation, separator, torch, target_device
+        )
+        record = {
+            "epoch": iteration,
+            "training_loss": float(objective_value),
+            "validation_loss": validation_loss,
+        }
+        history.append(record)
+        latest = _pack_checkpoint(
+            torch, model, None, iteration, signature, history, "vmmin",
+            {"vmmin_alpha": initial_alpha, "vmmin_beta": initial_beta},
+        )
+        if validation_loss is not None and validation_loss < best_validation_loss:
+            best_validation_loss = validation_loss
+            best_iteration = iteration
+            best_checkpoint = latest
+        if on_epoch:
+            on_epoch(
+                {
+                    **record,
+                    "checkpoint_bytes": latest,
+                    "device": str(target_device),
+                }
+            )
+
+    outcome = train_with_vmmin(
+        torch=torch,
+        model=model,
+        source=source,
+        preparation=preparation,
+        separator=separator,
+        device=target_device,
+        initial_weights=initial_weights,
+        max_iterations=epochs,
+        initial_alpha=initial_alpha,
+        initial_beta=initial_beta,
+        on_iteration=callback,
+    )
+    completed = previous_iterations + outcome["iterations"]
+    latest = _pack_checkpoint(
+        torch, model, None, completed, signature, history, "vmmin",
+        {"vmmin_alpha": outcome["alpha"], "vmmin_beta": outcome["beta"]},
+    )
+    if best_iteration == completed and np.isfinite(best_validation_loss):
+        best_checkpoint = latest
+    selected = best_checkpoint if best_iteration > previous_iterations else latest
+    return {
+        "checkpoint_bytes": selected or latest,
+        "history": pd.DataFrame(history),
+        "completed_epoch": completed,
+        "best_epoch": best_iteration if best_iteration > previous_iterations else completed,
+        "best_validation_loss": (
+            best_validation_loss if np.isfinite(best_validation_loss) else None
+        ),
+        "stopped_early": False,
+        "device": str(target_device),
+        "converged": outcome["converged"],
+        "weight_decay_alpha": outcome["alpha"],
+        "weight_decay_beta": outcome["beta"],
     }
