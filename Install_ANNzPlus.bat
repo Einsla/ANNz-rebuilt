@@ -44,12 +44,12 @@ if errorlevel 1 goto install_failed
 
 echo Installing PyTorch and ANNzPlus dependencies.
 echo This may take several minutes and requires an internet connection.
-".venv\Scripts\python.exe" install.py
+".venv\Scripts\python.exe" "installation\windows\install.py"
 if errorlevel 1 goto install_failed
 
 echo.
 echo Creating desktop and Start Menu shortcuts...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0Create_ANNzPlus_Shortcut.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0installation\windows\Create_ANNzPlus_Shortcut.ps1"
 if errorlevel 1 (
     echo The app was installed, but shortcut creation failed.
     echo You can still launch it using Run_ANNzPlus.bat.

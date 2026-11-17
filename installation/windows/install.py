@@ -1,7 +1,8 @@
 """Install ANNz-rebuilt with a hardware-appropriate PyTorch wheel.
 
-Run install.py from the repository root, preferably inside a virtual environment.
-NVIDIA systems use the CUDA 12.8 PyTorch index; other systems use CPU wheels.
+Run this script from the repository checkout, preferably inside its virtual
+environment. NVIDIA systems use the CUDA 12.8 PyTorch index; other systems
+use CPU wheels.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ def _has_nvidia_gpu() -> bool:
 
 
 def main() -> int:
-    project_root = Path(__file__).resolve().parent
+    repository_root = Path(__file__).resolve().parents[2]
     if sys.version_info < (3, 9):
         print("ANNz-rebuilt requires Python 3.9 or newer.")
         return 1
@@ -51,26 +52,19 @@ def main() -> int:
         )
         _run(
             [
-                python,
-                "-m",
-                "pip",
-                "install",
-                "--upgrade",
-                "torch",
-                "--index-url",
-                torch_index,
+                python, "-m", "pip", "install", "--upgrade", "torch",
+                "--index-url", torch_index,
             ]
         )
-
         print("Installing ANNz-rebuilt and its declared runtime dependencies...")
-        _run([python, "-m", "pip", "install", "--upgrade", str(project_root)])
+        _run([python, "-m", "pip", "install", "--upgrade", str(repository_root)])
     except subprocess.CalledProcessError as exc:
         print("\nInstallation failed. Check Python compatibility and network access.")
         return int(exc.returncode or 1)
 
     print("\nInstallation completed.")
     print("Launch the application with:")
-    print(f'  "{python}" -m streamlit run "{project_root / "app.py"}"')
+    print(f'  "{python}" -m streamlit run "{repository_root / "app.py"}"')
     return 0
 
 

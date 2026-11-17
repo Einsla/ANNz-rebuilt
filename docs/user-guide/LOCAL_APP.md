@@ -3,20 +3,20 @@
 ## Windows installation
 
 1. Download and extract the complete repository.
-2. Double-click `Install_ANNzPlus.bat`.
-3. The installer creates an isolated `.venv`, installs the hardware-appropriate PyTorch wheel and project dependencies, and creates desktop and Start Menu shortcuts.
-4. Launch **ANNzPlus Python** from the desktop, or double-click `Run_ANNzPlus.bat`.
+2. Double-click `Install_ANNzPlus.bat` in the repository root.
+3. The installer creates an isolated `.venv`, installs the hardware-appropriate PyTorch wheel and project dependencies, and creates Desktop and Start Menu shortcuts.
+4. Launch **ANNzPlus Python** from the Desktop, or double-click `Run_ANNzPlus.bat`.
 
-Python 3.9 or newer and an internet connection are required for the first installation. NVIDIA systems use the CUDA 12.8 PyTorch package when `nvidia-smi` detects a GPU; otherwise the CPU-only PyTorch package is installed. No virtual environment or large binary dependency is stored in GitHub.
+Python 3.9 or newer and an internet connection are required for first installation. NVIDIA systems use the CUDA 12.8 PyTorch package when `nvidia-smi` detects a GPU; otherwise the CPU-only package is installed. See [the Windows installation guide](../../installation/windows/README.md).
 
 ## Manual setup
 
-From the repository root:
+Run from the repository root:
 
 ```powershell
 py -3 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
-.venv\Scripts\python.exe install.py
+.venv\Scripts\python.exe installation\windows\install.py
 .venv\Scripts\python.exe -m streamlit run app.py
 ```
 
@@ -31,17 +31,17 @@ For development:
 ## Workflow
 
 1. Upload a CSV or TSV file with a header row.
-2. Choose one or more input variables and target variables.
+2. Choose one or more input columns and target columns.
 3. Analyze the catalogue to review invalid values, summary statistics, and exploratory correlations.
 4. Prepare deterministic training, validation, and test splits. Invalid rows are excluded; input and target scaling is fitted from training rows only.
-5. Configure a manual network, or choose **Automatic** in the optimisation section to generate candidate hidden-layer layouts. Choose **Manual** if you want to supply your own layouts.
+5. Configure a manual network, or choose **Automatic** in the optimisation section to generate candidate hidden-layer layouts. Choose **Manual** to supply your own layouts.
 6. Choose Adam or L-BFGS (quasi-Newton), then compare layouts and activation functions. Adam candidates can also compare learning rates. Each candidate starts from fresh weights, is ranked using validation loss, and uses early stopping. The search is capped at 24 candidates.
 7. Train or continue the selected network. Adam uses mini-batches and epochs; L-BFGS uses full-batch optimisation iterations.
-8. Evaluate on the validation or test split using MAE, RMSE, predictive Q-squared, R-squared, and the ANNz+ photo-z metrics when the target is a recognised redshift column.
-9. Upload a catalogue with the selected input columns to write predictions as a CSV.
+8. Evaluate on validation or test data using MAE, RMSE, predictive Q-squared, R-squared, and ANNz+ photo-z metrics when the target is a recognised redshift column.
+9. Upload a catalogue with the selected input columns to write predictions as CSV.
 10. Download a reusable settings ZIP or a full project ZIP.
 
-**Important:** Use validation results for model selection. Keep the test split for final assessment after the architecture and hyperparameters have been chosen. The optimiser does not inspect the test split.
+**Important:** Use validation results for model selection. Keep the test split for final assessment after architecture and hyperparameters have been chosen. The optimiser does not inspect the test split.
 
 ## Optimisers
 
@@ -58,16 +58,16 @@ Choose **Download reusable settings ZIP** to save a portable configuration witho
 - Ranked optimisation results, training history, and the model checkpoint when available.
 - Original catalogue filename and SHA-256 fingerprint, but not the catalogue itself.
 
-To reuse it after closing and reopening the app:
+To reuse after restarting the app:
 
 1. Start Streamlit again.
-2. Upload the saved ZIP using **Open a saved project ZIP** at the top.
-3. If the ZIP does not contain the catalogue, upload the original catalogue file. For the saved scaling, split and checkpoint to remain valid, it must be the same file (matching SHA-256 fingerprint).
-4. The app restores the selected architecture, optimisation settings/results, training settings, and checkpoint. You can evaluate, predict, or continue training.
+2. Upload the saved ZIP using **Open a saved project ZIP**.
+3. If the ZIP does not contain the catalogue, upload the original catalogue file. For saved scaling, split and checkpoint to remain valid, it must be the same file (matching SHA-256 fingerprint).
+4. The app restores the selected architecture, optimisation settings/results, training settings, and checkpoint.
 
 ## Full project ZIP
 
-Choose **Download full project ZIP** to save the same reusable settings plus optional original catalogue data and available analysis reports. If you uncheck the option to include source data, you will need to upload the matching catalogue when reopening the ZIP.
+Choose **Download full project ZIP** to save reusable settings plus optional original catalogue data and available analysis reports. If source data is excluded, upload the matching catalogue when reopening the ZIP.
 
 The archive contains a versioned `project.json` manifest, a README, and optional `data/`, `analysis/`, and `training/` members. Older project ZIP formats (versions 1–4) remain readable.
 
