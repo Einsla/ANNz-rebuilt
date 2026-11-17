@@ -84,7 +84,6 @@ A full project ZIP can contain:
 - `analysis/`: data-quality and exploratory reports.
 - `training/checkpoint.pt`: model weights and optimiser state.
 - `training/history.csv`: training and validation loss history.
-- `training/history.csv`: training and validation loss history.
 - `training/optimisation_results.csv`: ranked candidate results.
 
 Open a project ZIP in the app to restore its settings and continue training. If source data was not included, upload the identical file; the app uses its SHA-256 fingerprint to protect saved scaling, split assignments, and checkpoints from accidental reuse with a different catalogue.

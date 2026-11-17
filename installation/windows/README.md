@@ -19,7 +19,9 @@
 
 The installer detects NVIDIA hardware using `nvidia-smi`. It chooses the
 CUDA 12.8 PyTorch wheel when an NVIDIA GPU is detected and the CPU wheel
-otherwise. PyTorch is downloaded during installation rather than stored in
+otherwise. Intel/AMD CPUs and non-NVIDIA GPUs therefore run through the
+reliable CPU backend on Windows; an AMD GPU is not automatically used for
+training. PyTorch is downloaded during installation rather than stored in
 GitHub because the wheels are large and hardware-specific.
 
 ## Manual installation
