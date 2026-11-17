@@ -262,3 +262,65 @@ def test_vmmin_training_on_cuda_when_available(prepared):
     )
     assert result["checkpoint_bytes"]
     assert result["device"].startswith("cuda")
+
+
+def test_portable_model_bundle_round_trip(prepared):
+    from annz_rebuilt.model_bundle import create_model_bundle, open_model_bundle
+
+    _, preparation, architecture = prepared
+    history = pd.DataFrame([
+        {"epoch": 1, "training_loss": 0.12, "validation_loss": 0.15},
+        {"epoch": 2, "training_loss": 0.08, "validation_loss": 0.11},
+    ])
+    results = pd.DataFrame([{"architecture": 8, "validation_loss": 0.11}])
+    artifact = create_model_bundle(
+        architecture.to_config_dict(),
+        preparation.to_config_dict(),
+        b"synthetic-checkpoint-bytes",
+        training_config={"optimizer": "adam", "learning_rate": 0.001},
+        training_history=history,
+        optimisation_results=results,
+        source_data_sha256="abc123",
+    )
+    restored = open_model_bundle(artifact)
+    assert restored.architecture == architecture.to_config_dict()
+    from annz_rebuilt.data_preparation import DataPreparation
+    assert DataPreparation.from_config_dict(restored.data_preparation) == preparation
+    assert restored.checkpoint_bytes == b"synthetic-checkpoint-bytes"
+    assert restored.training_config["optimizer"] == "adam"
+    pd.testing.assert_frame_equal(restored.training_history, history)
+    pd.testing.assert_frame_equal(restored.optimisation_results, results, check_dtype=False)
+    assert restored.source_data_sha256 == "abc123"
+
+
+def test_portable_model_bundle_rejects_invalid_archive():
+    from annz_rebuilt.model_bundle import open_model_bundle
+
+    with pytest.raises(ValueError, match="valid model bundle"):
+        open_model_bundle(b"not a zip archive")
+
+
+def test_saved_model_bundle_predicts_without_retraining(prepared, tmp_path):
+    from annz_rebuilt.data_preparation import DataPreparation
+    from annz_rebuilt.model_bundle import create_model_bundle, open_model_bundle
+
+    source, preparation, architecture = prepared
+    trained = train_model(
+        io.BytesIO(source), architecture, preparation, epochs=2, device="cpu"
+    )
+    artifact = create_model_bundle(
+        architecture.to_config_dict(), preparation.to_config_dict(),
+        trained["checkpoint_bytes"],
+        training_config={"optimizer": "adam", "learning_rate": 0.001},
+        training_history=trained["history"],
+    )
+    restored = open_model_bundle(artifact)
+    restored_preparation = DataPreparation.from_config_dict(restored.data_preparation)
+    prediction_input = pd.DataFrame({"x1": [0.1, 0.2], "x2": [0.3, 0.4]})
+    output = tmp_path / "from_saved_model.csv"
+    result = write_predictions_csv(
+        io.BytesIO(prediction_input.to_csv(index=False).encode("utf-8")),
+        output, architecture, restored_preparation, restored.checkpoint_bytes, device="cpu",
+    )
+    assert result["predicted_rows"] == 2
+    assert len(pd.read_csv(output)) == 2

@@ -281,8 +281,10 @@ def train_model(
             stopped_early = True
             break
 
+    # Always retain the lowest-validation-loss checkpoint when validation exists,
+    # even when patience-based early stopping is disabled.
     selected_checkpoint = (
-        best_checkpoint if early_stopping_patience is not None else latest
+        best_checkpoint if best_validation_loss < float("inf") else latest
     )
     if selected_checkpoint is None:
         selected_checkpoint = latest
@@ -596,7 +598,7 @@ def _train_vmmin(
     )
     if best_iteration == completed and np.isfinite(best_validation_loss):
         best_checkpoint = latest
-    selected = best_checkpoint if best_iteration > previous_iterations else latest
+    selected = best_checkpoint if np.isfinite(best_validation_loss) else latest
     return {
         "checkpoint_bytes": selected or latest,
         "history": pd.DataFrame(history),

@@ -75,12 +75,15 @@ The vmmin port is not yet end-to-end scientific parity: data normalisation, rand
 
 ## Project ZIP
 
-A project ZIP can contain:
+A standalone `.annzmodel` artifact can be downloaded after training. It contains the trained network weights, architecture, fitted input/target scaling, optimiser state when available, training configuration, epoch/iteration loss history, and optimisation results. It intentionally excludes the original catalogue. In a later session, load the `.annzmodel` file and upload a new catalogue with the saved input columns; the app runs prediction using the saved weights without retraining. The input catalogue is required for prediction, but it does not need the training targets.
+
+A full project ZIP can contain:
 
 - `project.json`: architecture, split settings, training configuration, and scaling values.
 - `data/`: original uploaded data, if included.
 - `analysis/`: data-quality and exploratory reports.
 - `training/checkpoint.pt`: model weights and optimiser state.
+- `training/history.csv`: training and validation loss history.
 - `training/history.csv`: training and validation loss history.
 - `training/optimisation_results.csv`: ranked candidate results.
 
