@@ -35,8 +35,8 @@ For development:
 3. Analyze the catalogue to review invalid values, summary statistics, and exploratory correlations.
 4. Prepare deterministic training, validation, and test splits. Invalid rows are excluded; input and target scaling is fitted from training rows only.
 5. Configure a manual network, or choose **Automatic** in the optimisation section to generate candidate hidden-layer layouts. Choose **Manual** to supply your own layouts.
-6. Choose Adam or L-BFGS (quasi-Newton), then compare layouts and activation functions. Adam candidates can also compare learning rates. Each candidate starts from fresh weights, is ranked using validation loss, and uses early stopping. The search is capped at 24 candidates.
-7. Train or continue the selected network. Adam uses mini-batches and epochs; L-BFGS uses full-batch optimisation iterations.
+6. Choose Adam or legacy vmmin (quasi-Newton), then compare layouts and activation functions. Adam candidates can also compare learning rates. Each candidate starts from fresh weights and is ranked using validation loss. Adam uses early stopping; vmmin uses its original convergence rules. The search is capped at 24 candidates.
+7. Train or continue the selected network. Adam uses mini-batches and epochs; legacy vmmin uses full-objective optimisation iterations while streaming source chunks.
 8. Evaluate on validation or test data using MAE, RMSE, predictive Q-squared, R-squared, and ANNz+ photo-z metrics when the target is a recognised redshift column.
 9. Upload a catalogue with the selected input columns to write predictions as CSV.
 10. Download a reusable settings ZIP or a full project ZIP.
@@ -45,7 +45,20 @@ For development:
 
 ## Optimisers
 
-Adam is the default mini-batch optimiser and uses a learning-rate setting. Training batches are shuffled within source chunks using a reproducible but epoch-specific seed. L-BFGS is a full-batch quasi-Newton option; it chooses step lengths internally and therefore does not use the Adam learning-rate field. L-BFGS can require substantially more memory because it evaluates the full training split together. If CUDA runs out of memory, select CPU or use Adam. The L-BFGS implementation is PyTorch's implementation and is conceptually similar to, but not an exact reproduction of, legacy ANNzPlus `vmmin()`.
+Adam is the default mini-batch optimiser and uses a learning-rate setting.
+Legacy vmmin ports the original ANNzPlus Tanh/train.cpp variable-metric
+algorithm. It evaluates the complete training-set objective and gradient,
+streaming the catalogue in bounded chunks between evaluations; it is not
+mini-batch SGD. It uses a dense inverse-Hessian approximation (O(P**2) CPU
+memory for P weights), is restricted to tanh hidden activations, and follows
+the legacy convergence/reset rules rather than validation-patience early
+stopping. Use smaller networks with vmmin and Adam for larger architectures.
+Existing L-BFGS checkpoints can restore their model weights, but vmmin starts
+a fresh variable-metric state when continuing from them.
+
+The port reproduces the optimiser mechanics and weight-decay schedule, but
+full scientific parity still requires matching C++ normalisation, weight
+initialisation and numerical execution. See the development parity notes.
 
 ## Reusable architecture/settings ZIP
 

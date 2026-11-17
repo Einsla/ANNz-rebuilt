@@ -19,6 +19,7 @@ from annz_rebuilt import architecture_from_selections  # noqa: E402
 from annz_rebuilt.architecture import SUPPORTED_ACTIVATIONS  # noqa: E402
 from annz_rebuilt.data_analysis import analyze_catalogue_csv  # noqa: E402
 from annz_rebuilt.data_preparation import DataPreparation, fit_data_preparation  # noqa: E402
+from annz_rebuilt.model_bundle import create_model_bundle, open_model_bundle  # noqa: E402
 from annz_rebuilt.neural_network import (  # noqa: E402
     evaluate_model,
     train_model,
@@ -54,14 +55,17 @@ def restore_project(zip_bytes: bytes) -> None:
     st.session_state["training_config"] = saved_training
     st.session_state["auto_tuning_results"] = project.optimisation_results
     optimisation = saved_training.get("optimisation", {})
+    saved_optimizer = saved_training.get("optimizer", "adam")
+    if saved_optimizer == "lbfgs":
+        saved_optimizer = "vmmin"
+    saved_search_optimizer = optimisation.get("optimizer", saved_optimizer)
+    if saved_search_optimizer == "lbfgs":
+        saved_search_optimizer = "vmmin"
     if optimisation.get("completed"):
         st.session_state["auto_tuned_architecture"] = config
     for key, value in (
         ("search_mode", optimisation.get("mode", "Automatic")),
-        (
-            "search_optimizer",
-            optimisation.get("optimizer", saved_training.get("optimizer", "adam")),
-        ),
+        ("search_optimizer", saved_search_optimizer),
         ("search_activations", optimisation.get("activations", ["leaky_relu", "relu"])),
         ("search_learning_rates", optimisation.get("learning_rates", [0.0003, 0.001])),
         (
@@ -72,7 +76,7 @@ def restore_project(zip_bytes: bytes) -> None:
         ("search_patience", optimisation.get("patience", 10)),
         ("epochs", saved_training.get("additional_epochs", 10)),
         ("learning_rate", saved_training.get("learning_rate", 0.001)),
-        ("optimizer_name", saved_training.get("optimizer", "adam")),
+        ("optimizer_name", saved_optimizer),
         ("compute_device", saved_training.get("device", "auto")),
     ):
         st.session_state[key] = value
@@ -137,6 +141,43 @@ def restore_project(zip_bytes: bytes) -> None:
     )
 
 
+model_upload = st.file_uploader(
+    "Load a trained ANNzPlus model (.annzmodel) — no retraining required",
+    type=["annzmodel"],
+    key="trained_model_upload",
+    help="Restores network weights, architecture, fitted scaling, optimiser settings and loss history. Upload a prediction catalogue below."
+)
+if model_upload is not None:
+    model_blob = model_upload.getvalue()
+    model_fingerprint = hashlib.sha256(model_blob).hexdigest()
+    if st.session_state.get("loaded_model_bundle_fingerprint") != model_fingerprint:
+        try:
+            bundle = open_model_bundle(model_blob)
+            config = bundle.architecture
+            preparation = DataPreparation.from_config_dict(bundle.data_preparation)
+            st.session_state["inputs"] = config["input_columns"]
+            st.session_state["targets"] = config["target_columns"]
+            st.session_state["layer_count"] = len(config["hidden_layers"])
+            st.session_state["activation"] = config["activation"]
+            for index, width in enumerate(config["hidden_layers"]):
+                st.session_state[f"layer_{index}"] = int(width)
+            st.session_state["data_preparation"] = preparation
+            st.session_state["trained_checkpoint"] = bundle.checkpoint_bytes
+            st.session_state["training_history"] = bundle.training_history
+            st.session_state["training_config"] = bundle.training_config
+            st.session_state["auto_tuning_results"] = bundle.optimisation_results
+            st.session_state["optimizer_name"] = bundle.training_config.get("optimizer", "adam")
+            st.session_state["learning_rate"] = bundle.training_config.get("learning_rate") or 0.001
+            st.session_state["compute_device"] = "auto"
+            st.session_state["model_bundle_loaded"] = True
+            st.session_state["loaded_model_bundle_fingerprint"] = model_fingerprint
+            st.session_state["checkpoint_signature"] = _model_signature(config, preparation)
+            st.session_state["data_preparation_signature"] = None
+            st.success("Trained model restored. Upload a catalogue containing the saved input columns to generate predictions without retraining.")
+        except (ValueError, KeyError, TypeError) as exc:
+            st.error(f"Could not load trained model: {exc}")
+            st.stop()
+
 project_upload = st.file_uploader("Open a saved project ZIP (optional)", type=["zip"])
 if project_upload is not None:
     project_bytes = project_upload.getvalue()
@@ -149,8 +190,13 @@ if project_upload is not None:
             st.error(f"Could not open project: {exc}")
             st.stop()
 
+if st.session_state.get("model_bundle_loaded") and st.button("Exit prediction-only mode and configure a new training run"):
+    for key in ("model_bundle_loaded", "loaded_model_bundle_fingerprint", "trained_checkpoint", "training_history", "checkpoint_signature", "data_preparation", "data_preparation_signature"):
+        st.session_state.pop(key, None)
+    st.rerun()
+
 uploaded = st.file_uploader(
-    "Upload a galaxy catalogue (CSV or TSV with a header row)",
+    "Upload a prediction catalogue (CSV or TSV with a header row)" if st.session_state.get("model_bundle_loaded") else "Upload a galaxy catalogue (CSV or TSV with a header row)",
     type=["csv", "tsv"],
     key="data_source_upload",
 )
@@ -172,7 +218,8 @@ data_fingerprint = hashlib.sha256(data_source_bytes).hexdigest()
 if st.session_state.get("data_source_fingerprint") != data_fingerprint:
     st.session_state["data_source_fingerprint"] = data_fingerprint
     st.session_state["catalogue_analysis"] = None
-    if st.session_state.get("loaded_data_source_sha256") != data_fingerprint:
+    if (st.session_state.get("loaded_data_source_sha256") != data_fingerprint
+            and not st.session_state.get("model_bundle_loaded")):
         st.session_state["data_preparation"] = None
         st.session_state["data_preparation_signature"] = None
         st.session_state["trained_checkpoint"] = None
@@ -202,7 +249,7 @@ if len(set(preview.columns)) != len(preview.columns):
     st.stop()
 columns = list(preview.columns)
 for key in ("inputs", "targets"):
-    if key in st.session_state:
+    if key in st.session_state and not st.session_state.get("model_bundle_loaded"):
         st.session_state[key] = [
             name for name in st.session_state[key] if name in columns
         ]
@@ -214,18 +261,27 @@ st.caption(
 st.dataframe(preview.head(10), use_container_width=True)
 
 st.subheader("1. Choose the variables")
-inputs = st.multiselect(
-    "Input variables — what information should the model use?",
-    columns,
-    key="inputs",
-    help="For example: veldisp, deVAB_u, and deVRad_u.",
-)
-targets = st.multiselect(
-    "Target variable(s) — what should the model learn to predict?",
-    columns,
-    key="targets",
-    help="For example: z. Inputs and targets must be separate.",
-)
+if st.session_state.get("model_bundle_loaded"):
+    inputs = st.session_state.get("inputs", [])
+    targets = st.session_state.get("targets", [])
+    missing_model_inputs = [name for name in inputs if name not in columns]
+    if missing_model_inputs:
+        st.error("Prediction catalogue is missing model inputs: " + ", ".join(missing_model_inputs))
+        st.stop()
+    st.info("Loaded model inputs: " + ", ".join(inputs) + " | Predicted target(s): " + ", ".join(targets))
+else:
+    inputs = st.multiselect(
+        "Input variables — what information should the model use?",
+        columns,
+        key="inputs",
+        help="For example: veldisp, deVAB_u, and deVRad_u.",
+    )
+    targets = st.multiselect(
+        "Target variable(s) — what should the model learn to predict?",
+        columns,
+        key="targets",
+        help="For example: z. Inputs and targets must be separate.",
+    )
 
 st.subheader("2. Analyze the galaxy data")
 st.write(
@@ -240,7 +296,7 @@ rows_per_batch = st.number_input(
     step=1_000,
     key="rows_per_batch",
 )
-if st.button("Analyze data"):
+if st.button("Analyze data", disabled=st.session_state.get("model_bundle_loaded", False)):
     try:
         with st.spinner("Scanning the catalogue in batches..."):
             st.session_state["catalogue_analysis"] = analyze_catalogue_csv(
@@ -328,20 +384,21 @@ current_preparation_signature = (
     int(rows_per_batch),
     int(training_batch_size),
 )
-if st.session_state.get("data_preparation_signature") not in {
+if (st.session_state.get("data_preparation_signature") not in {
     None,
     current_preparation_signature,
-}:
+} and not st.session_state.get("model_bundle_loaded")):
     st.session_state["data_preparation"] = None
     st.session_state["trained_checkpoint"] = None
     st.session_state["checkpoint_signature"] = None
     st.session_state["training_history"] = None
     st.session_state.pop("auto_tuning_results", None)
-if st.session_state.get("data_preparation_signature") != current_preparation_signature:
+if (st.session_state.get("data_preparation_signature") != current_preparation_signature
+        and not st.session_state.get("model_bundle_loaded")):
     st.session_state["data_preparation"] = None
     st.session_state["data_preparation_signature"] = current_preparation_signature
 
-if st.button("Prepare data splits"):
+if st.button("Prepare data splits", disabled=st.session_state.get("model_bundle_loaded", False)):
     try:
         with st.spinner("Scanning rows and fitting training-only scaling..."):
             preparation = fit_data_preparation(
@@ -460,7 +517,7 @@ if architecture is not None and preparation is not None:
     )
     st.caption(
         "Choose an optimiser, then compare hidden-layer layouts and activation functions "
-        "using validation MSE. Adam uses mini-batches; L-BFGS is a full-batch quasi-Newton method."
+        "using validation loss. Adam updates weights with mini-batches; legacy vmmin uses the full training-set objective and gradient, streamed from disk in chunks."
     )
     if preparation.validation_fraction <= 0:
         st.warning(
@@ -476,21 +533,23 @@ if architecture is not None and preparation is not None:
         )
         search_optimizer = st.selectbox(
             "Optimisation method",
-            ["adam", "lbfgs"],
+            ["adam", "vmmin"],
             format_func=lambda value: (
                 "Adam (mini-batch gradient optimisation)"
                 if value == "adam"
-                else "L-BFGS (quasi-Newton)"
+                else "Legacy ANNzPlus vmmin (variable-metric quasi-Newton)"
             ),
             key="search_optimizer",
-            help="L-BFGS is a practical quasi-Newton alternative, not an exact port of the legacy ANNzPlus vmmin routine.",
+            help="Uses the variable-metric update, line search, reset rules and weight-decay schedule in the original ANNzPlus Tanh/train.cpp.",
         )
+        if search_optimizer == "vmmin":
+            st.session_state["search_activations"] = ["tanh"]
         search_col1, search_col2 = st.columns(2)
         with search_col1:
             search_activations = st.multiselect(
                 "Activation functions to compare",
-                sorted(SUPPORTED_ACTIVATIONS),
-                default=["leaky_relu", "relu"],
+                (["tanh"] if search_optimizer == "vmmin" else sorted(SUPPORTED_ACTIVATIONS)),
+                default=(["tanh"] if search_optimizer == "vmmin" else ["leaky_relu", "relu"]),
                 key="search_activations",
             )
             if search_optimizer == "adam":
@@ -504,7 +563,7 @@ if architecture is not None and preparation is not None:
             else:
                 search_learning_rates = [1.0]
                 st.caption(
-                    "L-BFGS determines its step length internally; no Adam-style learning rate is required."
+                    "legacy vmmin determines its step length internally; no Adam-style learning rate is required."
                 )
         with search_col2:
             if search_mode == "Automatic":
@@ -557,29 +616,50 @@ if architecture is not None and preparation is not None:
             search_epochs = st.number_input(
                 "Maximum epochs per candidate"
                 if search_optimizer == "adam"
-                else "Maximum L-BFGS iterations per candidate",
+                else "Maximum legacy vmmin iterations per candidate",
                 5,
                 300,
                 80,
                 step=5,
                 key="search_epochs",
             )
-            search_patience = st.number_input(
-                "Early-stopping patience",
-                2,
-                40,
-                10,
-                step=1,
-                key="search_patience",
-                help="Stop a candidate after this many epochs (Adam) or iterations (L-BFGS) without validation-loss improvement.",
-            )
-        if search_optimizer == "lbfgs" and device_choice == "cuda":
+            if search_optimizer == "adam":
+                search_patience = st.number_input(
+                    "Early-stopping patience",
+                    2,
+                    40,
+                    10,
+                    step=1,
+                    key="search_patience",
+                    help="Stop an Adam candidate after this many epochs without validation-loss improvement.",
+                )
+            else:
+                search_patience = None
+                st.caption("Legacy vmmin uses its original objective and convergence rules; validation patience is not applied.")
+        if search_optimizer == "vmmin":
             st.warning(
-                "L-BFGS evaluates the full training split together and can use substantial GPU memory. If CUDA runs out of memory, switch the compute device to CPU or use Adam."
+                "Legacy vmmin uses a dense inverse-Hessian matrix in CPU memory (quadratic in the number of network weights). Very large networks may exceed its safety limit; use a smaller network or Adam."
             )
         if search_mode == "Automatic":
             layout_errors = []
         parsed_layouts = list(dict.fromkeys(parsed_layouts))
+        if search_optimizer == "vmmin":
+            def vmmin_parameter_count(layout):
+                widths = [len(inputs), *layout, len(targets)]
+                return sum((left + 1) * right for left, right in zip(widths[:-1], widths[1:]))
+            rejected_layouts = [
+                layout for layout in parsed_layouts
+                if vmmin_parameter_count(layout) > 5000
+            ]
+            parsed_layouts = [
+                layout for layout in parsed_layouts
+                if vmmin_parameter_count(layout) <= 5000
+            ]
+            if rejected_layouts:
+                st.warning(
+                    "Skipped vmmin layouts exceeding 5,000 weights (dense inverse-Hessian memory limit): "
+                    + ", ".join(str(list(layout)) for layout in rejected_layouts)
+                )
         search_step_label = "epoch" if search_optimizer == "adam" else "iteration"
         candidate_count = (
             len(parsed_layouts) * len(search_activations) * len(search_learning_rates)
@@ -603,6 +683,7 @@ if architecture is not None and preparation is not None:
                 or bool(layout_errors)
                 or candidate_count > 24
                 or preparation.validation_fraction <= 0
+                or st.session_state.get("model_bundle_loaded", False)
             ),
         ):
             candidates = [
@@ -629,7 +710,7 @@ if architecture is not None and preparation is not None:
                         + (
                             f"learning rate {rate:g}"
                             if search_optimizer == "adam"
-                            else "L-BFGS quasi-Newton"
+                            else "legacy vmmin quasi-Newton"
                         )
                     )
 
@@ -660,7 +741,7 @@ if architecture is not None and preparation is not None:
                         optimizer_name=search_optimizer,
                         separator=separator,
                         device=device_choice,
-                        early_stopping_patience=int(search_patience),
+                        early_stopping_patience=(int(search_patience) if search_optimizer == "adam" else None),
                         on_epoch=candidate_progress,
                     )
                     score = candidate_result["best_validation_loss"]
@@ -708,7 +789,7 @@ if architecture is not None and preparation is not None:
                         search_architectures_text if search_mode == "Manual" else ""
                     ),
                     "max_epochs": int(search_epochs),
-                    "patience": int(search_patience),
+                    "patience": int(search_patience) if search_patience is not None else None,
                     "optimizer": search_optimizer,
                     "selection_metric": "validation_mean_squared_error",
                     "best_validation_loss": float(best_score),
@@ -788,20 +869,20 @@ if architecture is not None and preparation is not None:
     st.subheader("6. Train the network")
     optimizer_choice = st.selectbox(
         "Optimisation method",
-        ["adam", "lbfgs"],
+        ["adam", "vmmin"],
         index=0 if st.session_state.get("optimizer_name", "adam") == "adam" else 1,
         format_func=lambda value: (
-            "Adam" if value == "adam" else "L-BFGS (quasi-Newton)"
+            "Adam" if value == "adam" else "Legacy ANNzPlus vmmin (variable-metric quasi-Newton)"
         ),
         key="optimizer_name",
-        help="L-BFGS is a full-batch quasi-Newton implementation in PyTorch. It is conceptually similar to the legacy optimiser, but not bit-for-bit identical.",
+        help="Faithful Python translation of the original ANNzPlus Tanh/train.cpp variable-metric routine; it uses a dense inverse-Hessian approximation.",
     )
     train_left, train_mid = st.columns(2)
     with train_left:
         epochs = st.number_input(
             "Additional epochs"
             if optimizer_choice == "adam"
-            else "Additional L-BFGS iterations",
+            else "Additional legacy vmmin iterations",
             1,
             500,
             10,
@@ -821,23 +902,29 @@ if architecture is not None and preparation is not None:
         else:
             learning_rate = 1.0
             st.caption(
-                "L-BFGS selects step lengths internally; the Adam learning-rate setting is not used."
+                "legacy vmmin selects step lengths internally; the Adam learning-rate setting is not used."
             )
-    if optimizer_choice == "lbfgs" and device_choice == "cuda":
+    if optimizer_choice == "vmmin":
         st.warning(
-            "L-BFGS holds the full training split on the selected device. If CUDA runs out of memory, switch to CPU or use Adam."
+            "Legacy vmmin stores a dense inverse-Hessian approximation in CPU memory. Large networks may exceed its safety limit; use a smaller network or Adam."
         )
+        if architecture.activation != "tanh":
+            st.error("The original Tanh/train.cpp vmmin implementation requires tanh hidden-layer activations. Change the activation in section 4.")
     st.caption(
-        "Adam rereads the source in mini-batches. L-BFGS materializes the full training split. "
+        "Adam updates weights after each mini-batch. Legacy vmmin evaluates the full training objective and gradient by streaming chunks; its dense inverse-Hessian matrix uses O(weights?) CPU memory. "
         "When continuing with the same optimiser, its saved state is restored; switching optimisers "
         "keeps the network weights but starts fresh optimiser state."
     )
-    if st.button("Start / continue training", type="primary"):
+    if st.button(
+        "Start / continue training",
+        type="primary",
+        disabled=(st.session_state.get("model_bundle_loaded", False) or (optimizer_choice == "vmmin" and architecture.activation != "tanh")),
+    ):
         progress = st.progress(0)
         status = st.empty()
         progress_state = {"steps_this_run": 0}
         training_step_label = (
-            "epoch" if optimizer_choice == "adam" else "L-BFGS iteration"
+            "epoch" if optimizer_choice == "adam" else "legacy vmmin iteration"
         )
 
         def update_progress(event):
@@ -845,7 +932,7 @@ if architecture is not None and preparation is not None:
             st.session_state["trained_checkpoint"] = event["checkpoint_bytes"]
             st.session_state["last_epoch"] = event["epoch"]
             status.write(
-                f"{'Epoch' if optimizer_choice == 'adam' else 'L-BFGS iteration'} {event['epoch']}: training loss {event['training_loss']:.6g}; "
+                f"{'Epoch' if optimizer_choice == 'adam' else 'legacy vmmin iteration'} {event['epoch']}: {'training loss' if optimizer_choice == 'adam' else 'training objective'} {event['training_loss']:.6g}; "
                 f"validation loss {event['validation_loss'] if event['validation_loss'] is not None else 'not available'} "
                 f"({event['device']})"
             )
@@ -891,7 +978,7 @@ if architecture is not None and preparation is not None:
         st.markdown("**Training history**")
         st.dataframe(history, hide_index=True, use_container_width=True)
         st.caption(
-            "The horizontal axis is an epoch for Adam or an optimisation iteration for L-BFGS."
+            "The horizontal axis is an epoch for Adam or an optimisation iteration for legacy vmmin."
         )
         st.line_chart(history.set_index("epoch")[["training_loss", "validation_loss"]])
 
@@ -903,7 +990,9 @@ if architecture is not None and preparation is not None:
             ["test", "validation", "train"],
             key="evaluation_split",
         )
-        if st.button("Evaluate model"):
+        if st.session_state.get("model_bundle_loaded"):
+            st.info("This is a prediction-only model load. The original training catalogue is not required; upload a catalogue with the saved input columns in the prediction section. Training-split evaluation is disabled because this catalogue may differ from the training data.")
+        if st.button("Evaluate model", disabled=st.session_state.get("model_bundle_loaded", False)):
             try:
                 report = evaluate_model(
                     io.BytesIO(data_source_bytes),
@@ -930,13 +1019,19 @@ if architecture is not None and preparation is not None:
             )
 
         st.subheader("8. Generate predictions")
-        prediction_upload = st.file_uploader(
-            "Upload a catalogue containing the selected input columns",
-            type=["csv", "tsv"],
-            key="prediction_upload",
-        )
-        if prediction_upload is not None and st.button("Write prediction file"):
-            prediction_name = prediction_upload.name
+        if st.session_state.get("model_bundle_loaded"):
+            prediction_bytes = data_source_bytes
+            prediction_name = data_source_name
+            st.caption("Using the uploaded catalogue as prediction input. No training data or retraining is needed.")
+        else:
+            prediction_upload = st.file_uploader(
+                "Upload a catalogue containing the selected input columns",
+                type=["csv", "tsv"],
+                key="prediction_upload",
+            )
+            prediction_bytes = prediction_upload.getvalue() if prediction_upload is not None else None
+            prediction_name = prediction_upload.name if prediction_upload is not None else ""
+        if prediction_bytes is not None and st.button("Write prediction file"):
             prediction_separator = (
                 "\t" if prediction_name.lower().endswith(".tsv") else ","
             )
@@ -946,7 +1041,7 @@ if architecture is not None and preparation is not None:
             )
             try:
                 result = write_predictions_csv(
-                    io.BytesIO(prediction_upload.getvalue()),
+                    io.BytesIO(prediction_bytes),
                     output_file,
                     architecture,
                     preparation,
@@ -961,7 +1056,25 @@ if architecture is not None and preparation is not None:
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(f"Could not generate predictions: {exc}")
 
-st.subheader("9. Save the project")
+st.subheader("9. Save the trained model and project")
+if st.session_state.get("trained_checkpoint") and preparation is not None and architecture is not None:
+    model_artifact = create_model_bundle(
+        architecture.to_config_dict(),
+        preparation.to_config_dict(),
+        st.session_state["trained_checkpoint"],
+        training_config=st.session_state.get("training_config", {}),
+        training_history=st.session_state.get("training_history"),
+        optimisation_results=st.session_state.get("auto_tuning_results"),
+        source_data_sha256=st.session_state.get("data_source_fingerprint"),
+    )
+    st.download_button(
+        "Download trained model (.annzmodel)",
+        model_artifact,
+        file_name="annzplus_trained_model.annzmodel",
+        mime="application/zip",
+        help="Standalone model: architecture, learned weights, fitted scaling, best settings, optimiser state and loss history. Does not include the training catalogue.",
+    )
+    st.caption("Load this .annzmodel file in a future session and upload a new catalogue with the same input columns. Predictions use the saved weights and scaling; no retraining or original training catalogue is required.")
 include_data = st.checkbox(
     "Include the original data source in the project ZIP", value=True
 )

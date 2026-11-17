@@ -121,26 +121,30 @@ def test_adam_loss_is_mean_over_all_targets_and_metrics_work(prepared):
     assert {"MAE", "RMSE", "R2", "Q2", "sigma_RMS"}.issubset(report.columns)
 
 
-def test_lbfgs_training_and_checkpoint_resume(prepared):
+def test_vmmin_training_and_checkpoint_resume(prepared):
+    torch = pytest.importorskip("torch")
     source, preparation, architecture = prepared
     first = train_model(
         io.BytesIO(source),
         architecture,
         preparation,
         epochs=2,
-        optimizer_name="lbfgs",
-        early_stopping_patience=2,
+        optimizer_name="vmmin",
         device="cpu",
     )
     assert first["completed_epoch"] >= 1
+    state = torch.load(io.BytesIO(first["checkpoint_bytes"]), map_location="cpu", weights_only=True)
+    assert state["optimizer_name"] == "vmmin"
+    assert state["optimizer_state"] is None
+    assert state["vmmin_alpha"] > 0
+    assert state["vmmin_beta"] > 0
     resumed = train_model(
         io.BytesIO(source),
         architecture,
         preparation,
         epochs=1,
-        optimizer_name="lbfgs",
+        optimizer_name="vmmin",
         checkpoint_bytes=first["checkpoint_bytes"],
-        early_stopping_patience=2,
         device="cpu",
     )
     assert resumed["completed_epoch"] >= first["completed_epoch"]
@@ -200,7 +204,7 @@ def test_project_zip_rejects_unsafe_member_path():
         open_project_zip(buffer.getvalue())
 
 
-def test_switching_between_adam_and_lbfgs_keeps_model_weights(prepared):
+def test_switching_between_adam_and_vmmin_keeps_model_weights(prepared):
     source, preparation, architecture = prepared
     adam = train_model(
         io.BytesIO(source), architecture, preparation,
@@ -208,7 +212,7 @@ def test_switching_between_adam_and_lbfgs_keeps_model_weights(prepared):
     )
     quasi_newton = train_model(
         io.BytesIO(source), architecture, preparation,
-        epochs=1, optimizer_name="lbfgs",
+        epochs=1, optimizer_name="vmmin",
         checkpoint_bytes=adam["checkpoint_bytes"], device="cpu",
     )
     switched_back = train_model(
@@ -219,3 +223,104 @@ def test_switching_between_adam_and_lbfgs_keeps_model_weights(prepared):
     assert quasi_newton["checkpoint_bytes"]
     assert switched_back["checkpoint_bytes"]
     assert switched_back["completed_epoch"] >= 1
+
+
+def test_legacy_vmmin_minimises_quadratic_objective():
+    from annz_rebuilt.legacy_vmmin import vmmin
+
+    target = np.array([1.5, -2.0, 0.25], dtype=np.float64)
+
+    def objective(weights):
+        difference = weights - target
+        return 0.5 * float(np.dot(difference, difference))
+
+    def gradient(weights):
+        return weights - target
+
+    result = vmmin(
+        np.array([8.0, 4.0, -5.0]),
+        objective,
+        gradient,
+        max_iterations=30,
+    )
+    assert result.objective < 1e-10
+    np.testing.assert_allclose(result.weights, target, atol=1e-5)
+
+
+def test_vmmin_training_on_cuda_when_available(prepared):
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+    source, preparation, architecture = prepared
+    result = train_model(
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=1,
+        optimizer_name="vmmin",
+        device="cuda",
+    )
+    assert result["checkpoint_bytes"]
+    assert result["device"].startswith("cuda")
+
+
+def test_portable_model_bundle_round_trip(prepared):
+    from annz_rebuilt.model_bundle import create_model_bundle, open_model_bundle
+
+    _, preparation, architecture = prepared
+    history = pd.DataFrame([
+        {"epoch": 1, "training_loss": 0.12, "validation_loss": 0.15},
+        {"epoch": 2, "training_loss": 0.08, "validation_loss": 0.11},
+    ])
+    results = pd.DataFrame([{"architecture": 8, "validation_loss": 0.11}])
+    artifact = create_model_bundle(
+        architecture.to_config_dict(),
+        preparation.to_config_dict(),
+        b"synthetic-checkpoint-bytes",
+        training_config={"optimizer": "adam", "learning_rate": 0.001},
+        training_history=history,
+        optimisation_results=results,
+        source_data_sha256="abc123",
+    )
+    restored = open_model_bundle(artifact)
+    assert restored.architecture == architecture.to_config_dict()
+    from annz_rebuilt.data_preparation import DataPreparation
+    assert DataPreparation.from_config_dict(restored.data_preparation) == preparation
+    assert restored.checkpoint_bytes == b"synthetic-checkpoint-bytes"
+    assert restored.training_config["optimizer"] == "adam"
+    pd.testing.assert_frame_equal(restored.training_history, history)
+    pd.testing.assert_frame_equal(restored.optimisation_results, results, check_dtype=False)
+    assert restored.source_data_sha256 == "abc123"
+
+
+def test_portable_model_bundle_rejects_invalid_archive():
+    from annz_rebuilt.model_bundle import open_model_bundle
+
+    with pytest.raises(ValueError, match="valid model bundle"):
+        open_model_bundle(b"not a zip archive")
+
+
+def test_saved_model_bundle_predicts_without_retraining(prepared, tmp_path):
+    from annz_rebuilt.data_preparation import DataPreparation
+    from annz_rebuilt.model_bundle import create_model_bundle, open_model_bundle
+
+    source, preparation, architecture = prepared
+    trained = train_model(
+        io.BytesIO(source), architecture, preparation, epochs=2, device="cpu"
+    )
+    artifact = create_model_bundle(
+        architecture.to_config_dict(), preparation.to_config_dict(),
+        trained["checkpoint_bytes"],
+        training_config={"optimizer": "adam", "learning_rate": 0.001},
+        training_history=trained["history"],
+    )
+    restored = open_model_bundle(artifact)
+    restored_preparation = DataPreparation.from_config_dict(restored.data_preparation)
+    prediction_input = pd.DataFrame({"x1": [0.1, 0.2], "x2": [0.3, 0.4]})
+    output = tmp_path / "from_saved_model.csv"
+    result = write_predictions_csv(
+        io.BytesIO(prediction_input.to_csv(index=False).encode("utf-8")),
+        output, architecture, restored_preparation, restored.checkpoint_bytes, device="cpu",
+    )
+    assert result["predicted_rows"] == 2
+    assert len(pd.read_csv(output)) == 2
