@@ -140,8 +140,14 @@ def _mean_and_scale(
     if count == 0:
         raise ValueError(f"No usable training rows remain for {label}.")
     mean = total / count
-    variance = np.maximum(sum_squares / count - np.square(mean), 0.0)
+    # Match ANNz+'s sample-standard-deviation convention (N-1 denominator).
+    # Scaling is still fitted on the training split only to avoid validation leakage.
+    if count > 1:
+        variance = np.maximum((sum_squares - count * np.square(mean)) / (count - 1), 0.0)
+    else:
+        variance = np.zeros_like(mean)
     scale = np.sqrt(variance)
+    # Constant columns (or a single training row) must not cause division by zero.
     scale[scale == 0.0] = 1.0
     return tuple(mean.tolist()), tuple(scale.tolist())
 
@@ -152,8 +158,8 @@ def fit_data_preparation(
     target_columns: Sequence[str],
     *,
     separator: str | None = ",",
-    rows_per_batch: int = 100_000,
-    batch_size: int = 4_096,
+    rows_per_batch: int = 50_000,
+    batch_size: int = 512,
     train_fraction: float = 0.70,
     validation_fraction: float = 0.15,
     random_seed: int = 42,

@@ -2,74 +2,58 @@
 
 ## Project overview
 
-This project investigates and rebuilds the legacy [ANNzPlus](https://github.com/imdadmpt/ANNzPlus) photometric-redshift software in Python. The legacy repository describes ANNzPlus as an extension of ANNz for estimating galaxy photometric redshifts, with support for multiple neural-network activation functions.
+This project investigates and rebuilds the legacy [ANNzPlus](https://github.com/imdadmpt/ANNzPlus) photometric-redshift workflow in Python. ANNzPlus extends ANNz for estimating galaxy photometric redshifts with configurable neural networks.
 
-The rebuild will document the legacy behavior, implement a maintainable Python workflow, and compare its outputs with the legacy implementation on suitable data. It is a research and software engineering project; numerical equivalence and any performance claims must be established through documented experiments.
+The rebuild is a local research prototype. It includes batched catalogue analysis and preparation, configurable fully connected regression networks, mini-batch training, validation/test metrics, prediction export, and portable project ZIP files with resumable training checkpoints. Matching legacy behavior and scientific performance still requires controlled comparison against the original software and suitable reference data.
 
 ## Research objective
 
-To determine how faithfully the core ANNzPlus photometric-redshift workflow can be reproduced in Python, and to evaluate the rebuilt implementation against the legacy software using controlled, reproducible data, configuration, and validation metrics.
+Determine how faithfully the core ANNzPlus photometric-redshift workflow can be reproduced in Python, then compare predictions under matched input variables, data splits, and model settings. Report the results using defined accuracy metrics and document differences from the legacy system.
 
-## Research questions
+## Current local workflow
 
-1. Which inputs, preprocessing steps, model settings, activation functions, and outputs define the legacy ANNzPlus workflow?
-2. Can those behaviors be implemented clearly and reproducibly in Python?
-3. Under matched data splits and model settings, how closely do Python and legacy predictions agree?
-4. How do supported activation functions and selected training settings affect photometric-redshift accuracy and runtime?
-5. What limitations or differences need to be documented for users migrating from the legacy software?
+1. Upload a CSV/TSV galaxy catalogue and choose the input and target variables.
+2. Scan the catalogue in chunks for data quality and exploratory summary statistics.
+3. Prepare deterministic training, validation, and test splits. Invalid selected rows are skipped, and scaling is fitted from training rows only.
+4. Configure hidden-layer sizes and an activation function.
+5. Train in mini-batches, review training/validation loss, and continue from a saved checkpoint.
+6. Evaluate using MAE, RMSE, and R-squared, and write predictions for another catalogue.
+7. Save the settings, optional source data, analysis reports, training history, and checkpoint in a project ZIP.
 
-## Scope
+## Run the local app
 
-- Inspect the legacy source, manual, examples, and available validation material.
-- Record the expected input schema, preprocessing, training and inference behavior, configuration, and output format.
-- Build the Python implementation in small, documented components.
-- Preserve or explicitly document behavior that cannot be matched exactly.
-- Compare implementations using the same data, splits, and evaluation procedure where practical.
-- Report accuracy, prediction agreement, runtime, reproducibility, and limitations.
+From the repository root:
 
-The initial scope is the core workflow needed to train and evaluate photometric-redshift models. Additional features should be prioritized after the legacy behavior and project requirements are reviewed.
-
-## Proposed methodology
-
-1. **Legacy audit:** inventory source files and dependencies; extract the algorithm, data format, configuration, and activation-function behavior from the legacy repository and manual.
-2. **Specification:** write down expected inputs, preprocessing, model behavior, outputs, and known edge cases before implementation.
-3. **Python design:** select a modular structure for data loading, preprocessing, model configuration, training, prediction, metrics, and command-line use.
-4. **Implementation:** implement the agreed core behavior and record intentional differences from the legacy program.
-5. **Validation:** use documented datasets and fixed train/validation/test splits; avoid data leakage; compare predictions and report appropriate photometric-redshift metrics (for example bias, scatter, outlier fraction, and runtime).
-6. **Reproducibility:** record software versions, configuration, random seeds, data provenance, and commands needed to reproduce results.
-
-## Initial deliverables
-
-- Legacy behavior and requirements notes.
-- A Python package or application implementing the agreed core workflow.
-- Reproducible example configuration and usage documentation.
-- Validation scripts and a results report comparing the Python rebuild with the legacy baseline where the required baseline and data are available.
-- A migration and limitations guide.
-
-## Initial success criteria
-
-- The documented core workflow can be run from a clean Python environment using the published instructions.
-- Inputs, configuration, outputs, and failure cases are documented.
-- Validation runs are reproducible from recorded data references, splits, settings, and software versions.
-- Prediction agreement and accuracy are reported with defined metrics and an identified comparison baseline.
-- Any unsupported behavior or deviation from the legacy implementation is clearly stated.
-
-## Project status
-
-A local Streamlit prototype is under development. It supports catalogue upload, input and target selection, batched data-quality summaries, exploratory sample correlations, and project ZIP export/import. Neural-network training, prediction, and checkpoint recovery have not been implemented. Research decisions, datasets, and evaluation results should be recorded as they are confirmed.
-
-## Reference
-
-- Legacy software: [imdadmpt/ANNzPlus](https://github.com/imdadmpt/ANNzPlus)
-- Original ANNz reference cited by the legacy project: Collister & Lahav (2004), [The Astronomical Journal](https://iopscience.iop.org/article/10.1086/383254)
-- ANNz+ publication cited by the legacy project: Mahmud Pathi et al. (2025), [Journal of Cosmology and Astroparticle Physics](https://iopscience.iop.org/article/10.1088/1475-7516/2025/01/097/meta)
-
-
-## Local app prototype
-
-Run the local application from the repository root:
-
-    python -m pip install -r requirements.txt
+    python install.py
     python -m streamlit run app.py
 
-The current interface analyzes galaxy catalogue data and saves its settings and available analysis reports in a project ZIP. The optional original source file is stored under data/; generated quality statistics and sample correlations are stored under analysis/. Model training and prediction are still future work.
+The installer uses the current Python interpreter and installs the project plus
+its declared dependencies from `pyproject.toml`. This is the recommended
+hardware-aware installation route. If you have already selected the correct
+PyTorch build for your machine, `python -m pip install .` installs the project
+and resolves any remaining runtime libraries (NumPy, pandas, PyTorch, and
+Streamlit).
+
+The installer detects an NVIDIA GPU and selects a CUDA-enabled PyTorch wheel; otherwise it installs the CPU build. The app uses CUDA when PyTorch can access a compatible GPU and falls back to CPU when requested or when CUDA is unavailable. Catalogue processing defaults to 50,000-row CPU chunks and 512-row model mini-batches; adjust these values for your available system memory and GPU VRAM.
+
+## Project ZIP
+
+A project ZIP can contain:
+
+- `project.json`: selected variables, network configuration, split settings, and training-only scaling.
+- `data/<filename>`: original uploaded data, if included.
+- `analysis/`: data-quality and exploratory correlation reports, if available.
+- `training/checkpoint.pt`: network weights, optimizer state, and epoch history, if training has started.
+- `training/history.csv`: training and validation loss by epoch.
+
+Open a project ZIP in the app to restore its settings and continue training. If the source data was not included, upload the identical file to reuse its saved preparation settings and checkpoint.
+
+## Current limitations
+
+The local Streamlit uploader holds the uploaded source bytes in memory, even though catalogue processing and model training use bounded batches. Very large files may need a future direct-from-disk input flow. Prediction output is written to the user's Documents folder under `Galaxy Neural Network Analysis`. Neural-network results have not yet been validated against legacy ANNzPlus. The app is a research prototype and does not establish scientific equivalence by itself.
+
+## Research references
+
+- Legacy software: [imdadmpt/ANNzPlus](https://github.com/imdadmpt/ANNzPlus)
+- Collister & Lahav (2004), [The Astronomical Journal](https://iopscience.iop.org/article/10.1086/383254)
+- Mahmud Pathi et al. (2025), [Journal of Cosmology and Astroparticle Physics](https://iopscience.iop.org/article/10.1088/1475-7516/2025/01/097/meta)

@@ -1,4 +1,4 @@
-"""Local Streamlit app for galaxy catalogue analysis and training-data setup."""
+"""Local Streamlit app for galaxy data preparation and neural-network analysis."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -18,27 +19,29 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from annz_rebuilt import architecture_from_selections  # noqa: E402
 from annz_rebuilt.architecture import SUPPORTED_ACTIVATIONS  # noqa: E402
 from annz_rebuilt.data_analysis import analyze_catalogue_csv  # noqa: E402
-from annz_rebuilt.data_preparation import (  # noqa: E402
-    DataPreparation,
-    fit_data_preparation,
-)
+from annz_rebuilt.data_preparation import DataPreparation, fit_data_preparation  # noqa: E402
+from annz_rebuilt.neural_network import evaluate_model, train_model, write_predictions_csv  # noqa: E402
 from annz_rebuilt.project import create_project_zip, open_project_zip  # noqa: E402
 
 
-st.set_page_config(
-    page_title="Galaxy Neural Network Analysis",
-    page_icon="🌌",
-    layout="wide",
-)
+st.set_page_config(page_title="Galaxy Neural Network Analysis", page_icon="🌌", layout="wide")
 st.title("Galaxy Neural Network Analysis")
 st.write(
-    "Review galaxy data, choose the variables the model should use and predict, "
-    "prepare training splits, and save the project. Model training comes next."
+    "Prepare galaxy catalogue data, train a configurable neural network, evaluate it, "
+    "make predictions, and save the project so training can continue later."
 )
+
+
+def _model_signature(architecture: dict, preparation: DataPreparation) -> str:
+    return json.dumps(
+        {"architecture": architecture, "preparation": preparation.to_config_dict()},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def restore_project(zip_bytes: bytes) -> None:
-    """Restore project settings, source data, analysis reports, and preparation."""
+    """Restore app settings, source data, reports, split settings, and checkpoint."""
     project = open_project_zip(zip_bytes)
     config = project.architecture
     st.session_state["loaded_project_fingerprint"] = hashlib.sha256(zip_bytes).hexdigest()
@@ -56,15 +59,15 @@ def restore_project(zip_bytes: bytes) -> None:
         st.session_state[f"layer_{index}"] = int(size)
 
     preparation_config = project.data_preparation
-    if preparation_config is not None:
-        preparation = DataPreparation.from_config_dict(preparation_config)
-        st.session_state["data_preparation"] = preparation
-        st.session_state["train_share_percent"] = round(
-            preparation.train_fraction * 100
-        )
-        st.session_state["validation_share_percent"] = round(
-            preparation.validation_fraction * 100
-        )
+    preparation = (
+        DataPreparation.from_config_dict(preparation_config)
+        if preparation_config is not None
+        else None
+    )
+    st.session_state["data_preparation"] = preparation
+    if preparation is not None:
+        st.session_state["train_share_percent"] = round(preparation.train_fraction * 100)
+        st.session_state["validation_share_percent"] = round(preparation.validation_fraction * 100)
         st.session_state["rows_per_batch"] = preparation.rows_per_batch
         st.session_state["training_batch_size"] = preparation.batch_size
         st.session_state["random_seed"] = preparation.random_seed
@@ -79,8 +82,21 @@ def restore_project(zip_bytes: bytes) -> None:
             preparation.batch_size,
         )
     else:
-        st.session_state["data_preparation"] = None
         st.session_state["data_preparation_signature"] = None
+    st.session_state["trained_checkpoint"] = project.checkpoint_bytes
+    st.session_state["training_history"] = project.training_history
+    history = project.training_history
+    st.session_state["last_epoch"] = (
+        int(history["epoch"].max())
+        if history is not None and not history.empty and "epoch" in history
+        else 0
+    )
+    st.session_state["evaluation_report"] = None
+    st.session_state["checkpoint_signature"] = (
+        _model_signature(config, preparation)
+        if project.checkpoint_bytes is not None and preparation is not None
+        else None
+    )
 
 
 project_upload = st.file_uploader("Open a saved project ZIP (optional)", type=["zip"])
@@ -90,7 +106,7 @@ if project_upload is not None:
     if st.session_state.get("loaded_project_fingerprint") != fingerprint:
         try:
             restore_project(project_bytes)
-            st.success("Project settings loaded.")
+            st.success("Project settings and any saved training progress were loaded.")
         except (ValueError, KeyError, TypeError) as exc:
             st.error(f"Could not open project: {exc}")
             st.stop()
@@ -103,9 +119,7 @@ uploaded = st.file_uploader(
 saved_data = st.session_state.get("loaded_data_source_bytes")
 if saved_data is not None:
     data_source_bytes = saved_data
-    data_source_name = (
-        st.session_state.get("loaded_data_source_name") or "galaxies.csv"
-    )
+    data_source_name = st.session_state.get("loaded_data_source_name") or "galaxies.csv"
     st.caption(f"Using the data source saved in the project: {data_source_name}")
 elif uploaded is not None:
     data_source_bytes = uploaded.getvalue()
@@ -118,39 +132,34 @@ data_fingerprint = hashlib.sha256(data_source_bytes).hexdigest()
 if st.session_state.get("data_source_fingerprint") != data_fingerprint:
     st.session_state["data_source_fingerprint"] = data_fingerprint
     st.session_state["catalogue_analysis"] = None
-    expected_fingerprint = st.session_state.get("loaded_data_source_sha256")
-    if expected_fingerprint != data_fingerprint:
+    if st.session_state.get("loaded_data_source_sha256") != data_fingerprint:
         st.session_state["data_preparation"] = None
         st.session_state["data_preparation_signature"] = None
+        st.session_state["trained_checkpoint"] = None
+        st.session_state["checkpoint_signature"] = None
+        st.session_state["training_history"] = None
+        st.session_state["evaluation_report"] = None
         st.session_state["saved_quality_summary"] = None
         st.session_state["saved_sample_correlations"] = None
 
 separator = "\t" if data_source_name.lower().endswith(".tsv") else ","
 try:
-    preview = pd.read_csv(
-        io.BytesIO(data_source_bytes),
-        sep=separator,
-        nrows=100,
-    )
+    preview = pd.read_csv(io.BytesIO(data_source_bytes), sep=separator, nrows=100)
     preview.columns = [str(column).lstrip("#").strip() for column in preview.columns]
 except Exception as exc:
     st.error(f"Could not read the file as a headered CSV/TSV table: {exc}")
     st.stop()
-
 if len(set(preview.columns)) != len(preview.columns):
     st.error("Column names must be unique after removing a leading #.")
     st.stop()
-
 columns = list(preview.columns)
-for state_key in ("inputs", "targets"):
-    if state_key in st.session_state:
-        st.session_state[state_key] = [
-            name for name in st.session_state[state_key] if name in columns
-        ]
+for key in ("inputs", "targets"):
+    if key in st.session_state:
+        st.session_state[key] = [name for name in st.session_state[key] if name in columns]
 
 st.caption(
-    f"Showing up to {len(preview):,} preview rows · {len(columns)} variables · "
-    f"Source file: {data_source_name}"
+    f"Previewing up to {len(preview):,} rows · {len(columns)} variables · "
+    f"source: {data_source_name}"
 )
 st.dataframe(preview.head(10), use_container_width=True)
 
@@ -165,25 +174,25 @@ targets = st.multiselect(
     "Target variable(s) — what should the model learn to predict?",
     columns,
     key="targets",
-    help="For example: z. Input and target variables must be separate.",
+    help="For example: z. Inputs and targets must be separate.",
 )
 
 st.subheader("2. Analyze the galaxy data")
 st.write(
-    "The quality report scans the complete file in batches. It reports missing, "
-    "non-numeric, infinite, and finite values, with numeric summary statistics."
+    "Scan the full file in chunks for missing, non-numeric, infinite, and finite values, "
+    "then review summary statistics and exploratory correlations."
 )
 rows_per_batch = st.number_input(
     "Rows analyzed per batch",
     min_value=1_000,
     max_value=1_000_000,
-    value=100_000,
+    value=50_000,
     step=1_000,
     key="rows_per_batch",
 )
 if st.button("Analyze data"):
     try:
-        with st.spinner("Scanning the data source in batches..."):
+        with st.spinner("Scanning the catalogue in batches..."):
             st.session_state["catalogue_analysis"] = analyze_catalogue_csv(
                 io.BytesIO(data_source_bytes),
                 separator=separator,
@@ -200,74 +209,57 @@ if analysis is not None:
     quality_summary, sample, analyzed_rows = analysis
     st.success(f"Analyzed {analyzed_rows:,} rows.")
     st.dataframe(quality_summary, use_container_width=True)
-    selected_variables = list(dict.fromkeys([*inputs, *targets]))
-    valid_sample = sample.loc[
-        :, [name for name in selected_variables if name in sample.columns]
-    ].apply(pd.to_numeric, errors="coerce")
-    valid_sample = valid_sample.replace(
-        [float("inf"), float("-inf")], float("nan")
-    ).dropna()
-    if len(selected_variables) >= 2 and not valid_sample.empty:
-        sample_correlations = valid_sample.corr()
+    selected = list(dict.fromkeys([*inputs, *targets]))
+    selected = [name for name in selected if name in sample.columns]
+    sample_numbers = sample.loc[:, selected].apply(pd.to_numeric, errors="coerce")
+    sample_numbers = sample_numbers.replace([float("inf"), float("-inf")], float("nan")).dropna()
+    if len(selected) >= 2 and not sample_numbers.empty:
+        sample_correlations = sample_numbers.corr()
         st.markdown("**Exploratory correlation matrix**")
         st.dataframe(sample_correlations, use_container_width=True)
-        st.caption(
-            "Correlations use a sample of up to 20,000 rows. They are exploratory "
-            "estimates, not exact full-data correlations."
-        )
+        st.caption("Correlation values use a sample of up to 20,000 rows.")
 elif st.session_state.get("saved_quality_summary") is not None:
     quality_summary = st.session_state["saved_quality_summary"]
     sample_correlations = st.session_state.get("saved_sample_correlations")
-    st.caption("Showing analysis reports saved in this project ZIP.")
+    st.caption("Showing analysis reports saved in the opened project.")
     st.dataframe(quality_summary, use_container_width=True)
     if sample_correlations is not None:
-        st.markdown("**Saved exploratory correlation matrix**")
         st.dataframe(sample_correlations, use_container_width=True)
 
 st.subheader("3. Prepare training data")
 st.write(
-    "Rows with missing, non-numeric, or infinite selected values are dropped. "
-    "Input and target values are scaled using training rows only."
+    "Invalid selected rows are skipped. Scaling values are learned from the training split "
+    "only, then applied to validation and test data."
 )
-split_left, split_right = st.columns(2)
-with split_left:
+a, b = st.columns(2)
+with a:
     train_percent = st.slider(
-        "Training share (%)",
-        min_value=50,
-        max_value=90,
-        value=70,
-        step=5,
-        key="train_share_percent",
+        "Training share (%)", 50, 90, 70, step=5, key="train_share_percent"
     )
-with split_right:
+max_validation = min(40, 100 - train_percent)
+if st.session_state.get("validation_share_percent", 15) > max_validation:
+    st.session_state["validation_share_percent"] = max_validation
+with b:
     validation_percent = st.slider(
         "Validation share (%)",
-        min_value=0,
-        max_value=40,
-        value=15,
+        0,
+        max_validation,
+        min(15, max_validation),
         step=5,
         key="validation_share_percent",
     )
 test_percent = 100 - train_percent - validation_percent
-st.caption(f"Test share: {test_percent}% (must be at least 0%).")
-seed, batch = st.columns(2)
-with seed:
+st.caption(f"Test share: {test_percent}%")
+seed_col, batch_col = st.columns(2)
+with seed_col:
     random_seed = st.number_input(
-        "Random split seed",
-        min_value=0,
-        max_value=2_147_483_647,
-        value=42,
-        step=1,
-        key="random_seed",
+        "Random split seed", 0, 2_147_483_647, 42, step=1, key="random_seed"
     )
-with batch:
+with batch_col:
     training_batch_size = st.number_input(
-        "Training batch size",
-        min_value=128,
-        max_value=65_536,
-        value=4_096,
-        step=128,
+        "Training mini-batch size", 128, 65_536, 512, step=128,
         key="training_batch_size",
+        help="Rows fed to the neural network at a time. Smaller batches use less GPU memory.",
     )
 
 current_preparation_signature = (
@@ -280,14 +272,22 @@ current_preparation_signature = (
     int(rows_per_batch),
     int(training_batch_size),
 )
+if st.session_state.get("data_preparation_signature") not in {
+    None,
+    current_preparation_signature,
+}:
+    st.session_state["data_preparation"] = None
+    st.session_state["trained_checkpoint"] = None
+    st.session_state["checkpoint_signature"] = None
+    st.session_state["training_history"] = None
 if st.session_state.get("data_preparation_signature") != current_preparation_signature:
     st.session_state["data_preparation"] = None
     st.session_state["data_preparation_signature"] = current_preparation_signature
 
 if st.button("Prepare data splits"):
     try:
-        with st.spinner("Checking selected variables and fitting training-only scaling..."):
-            prepared = fit_data_preparation(
+        with st.spinner("Scanning rows and fitting training-only scaling..."):
+            preparation = fit_data_preparation(
                 io.BytesIO(data_source_bytes),
                 inputs,
                 targets,
@@ -298,129 +298,234 @@ if st.button("Prepare data splits"):
                 validation_fraction=validation_percent / 100,
                 random_seed=int(random_seed),
             )
-        st.session_state["data_preparation"] = prepared
+        st.session_state["data_preparation"] = preparation
         st.session_state["data_preparation_signature"] = current_preparation_signature
     except (ValueError, KeyError, OSError) as exc:
         st.error(f"Could not prepare this data source: {exc}")
 
 preparation = st.session_state.get("data_preparation")
-preparation_config = None
 if preparation is not None:
-    preparation_config = preparation.to_config_dict()
     st.success(
-        f"Prepared {preparation.usable_rows:,} usable rows out of "
-        f"{preparation.total_rows:,}; dropped {preparation.dropped_rows:,}."
+        f"{preparation.usable_rows:,} usable rows, {preparation.dropped_rows:,} skipped."
     )
-    split_summary = pd.DataFrame(
-        {
-            "split": list(preparation.rows_by_split),
-            "rows": list(preparation.rows_by_split.values()),
-        }
+    st.dataframe(
+        pd.DataFrame(
+            {"split": preparation.rows_by_split.keys(), "rows": preparation.rows_by_split.values()}
+        ),
+        hide_index=True,
+        use_container_width=True,
     )
-    st.dataframe(split_summary, hide_index=True, use_container_width=True)
-    scaling_summary = pd.DataFrame(
-        [
-            {
-                "variable": name,
-                "role": role,
-                "training_mean": mean,
-                "training_scale": scale,
-            }
-            for role, names, means, scales in (
-                (
-                    "input",
-                    preparation.input_columns,
-                    preparation.input_mean,
-                    preparation.input_scale,
-                ),
-                (
-                    "target",
-                    preparation.target_columns,
-                    preparation.target_mean,
-                    preparation.target_scale,
-                ),
-            )
-            for name, mean, scale in zip(names, means, scales)
-        ]
-    )
-    st.markdown("**Scaling fitted on training rows**")
-    st.dataframe(scaling_summary, hide_index=True, use_container_width=True)
-elif st.session_state.get("saved_data_preparation") is not None:
-    preparation_config = st.session_state["saved_data_preparation"]
-    st.caption("Saved train/validation/test split and scaling settings were restored.")
+    scaling = []
+    for role, names, means, scales in (
+        ("input", preparation.input_columns, preparation.input_mean, preparation.input_scale),
+        ("target", preparation.target_columns, preparation.target_mean, preparation.target_scale),
+    ):
+        scaling.extend(
+            {"variable": n, "role": role, "training_mean": m, "training_scale": s}
+            for n, m, s in zip(names, means, scales)
+        )
+    st.markdown("**Scaling learned from training rows**")
+    st.dataframe(pd.DataFrame(scaling), hide_index=True, use_container_width=True)
+else:
+    st.info("Prepare the data splits before training.")
 
 st.subheader("4. Describe the network")
 left, right = st.columns(2)
 with left:
     layer_count = st.number_input(
-        "Number of hidden layers",
-        min_value=1,
-        max_value=10,
-        value=1,
-        step=1,
-        key="layer_count",
+        "Hidden layers", 1, 10, 1, step=1, key="layer_count"
     )
 with right:
     activation = st.selectbox(
-        "Activation function",
-        sorted(SUPPORTED_ACTIVATIONS),
-        key="activation",
+        "Activation function", sorted(SUPPORTED_ACTIVATIONS), key="activation"
     )
-neurons = []
-for layer in range(int(layer_count)):
-    neurons.append(
-        int(
-            st.number_input(
-                f"Neurons in hidden layer {layer + 1}",
-                min_value=1,
-                max_value=4096,
-                value=10,
-                step=1,
-                key=f"layer_{layer}",
+neurons = [
+    int(
+        st.number_input(
+            f"Neurons in hidden layer {layer + 1}",
+            1,
+            4096,
+            10,
+            step=1,
+            key=f"layer_{layer}",
+        )
+    )
+    for layer in range(int(layer_count))
+]
+architecture = None
+try:
+    architecture = architecture_from_selections(inputs, targets, neurons, activation)
+    st.caption(
+        f"Network: {architecture.n_inputs} input(s) → "
+        f"{' → '.join(map(str, architecture.hidden_layers))} → "
+        f"{architecture.n_outputs} output(s)"
+    )
+except ValueError as exc:
+    st.info(f"Choose valid inputs and targets to configure the network: {exc}")
+
+if architecture is not None and preparation is not None:
+    model_signature = _model_signature(architecture.to_config_dict(), preparation)
+    if st.session_state.get("checkpoint_signature") not in {None, model_signature}:
+        st.session_state["trained_checkpoint"] = None
+        st.session_state["training_history"] = None
+        st.session_state["evaluation_report"] = None
+    st.session_state["checkpoint_signature"] = model_signature
+
+    st.subheader("5. Train the network")
+    train_left, train_mid, train_right = st.columns(3)
+    with train_left:
+        epochs = st.number_input("Additional epochs", 1, 500, 10, step=1, key="epochs")
+    with train_mid:
+        learning_rate = st.number_input(
+            "Learning rate", min_value=0.000001, max_value=1.0, value=0.001,
+            format="%.6f", key="learning_rate",
+        )
+    with train_right:
+        device_choice = st.selectbox(
+            "Compute device", ["auto", "cpu", "cuda"], index=0, key="compute_device"
+        )
+    st.caption(
+        "Training rereads the source in bounded chunks. If a checkpoint exists, "
+        "training continues from its saved weights and optimizer state."
+    )
+    if st.button("Start / continue training", type="primary"):
+        progress = st.progress(0)
+        status = st.empty()
+        progress_state = {"epochs_this_run": 0}
+
+        def update_progress(event):
+            progress_state["epochs_this_run"] += 1
+            st.session_state["trained_checkpoint"] = event["checkpoint_bytes"]
+            st.session_state["last_epoch"] = event["epoch"]
+            status.write(
+                f"Epoch {event['epoch']}: training loss {event['training_loss']:.6g}; "
+                f"validation loss {event['validation_loss'] if event['validation_loss'] is not None else 'not available'} "
+                f"({event['device']})"
             )
-        )
-    )
+            progress.progress(progress_state["epochs_this_run"] / int(epochs))
 
-if st.button("Review and save project", type="primary"):
-    try:
-        architecture = architecture_from_selections(
-            inputs,
-            targets,
-            neurons,
-            activation,
-        )
-        framed_inputs, framed_targets = architecture.frame_training_data(preview)
-        st.success(
-            f"Selections are valid: {architecture.n_inputs} input variable(s), "
-            f"{architecture.n_outputs} target variable(s)."
-        )
-        st.markdown("**Input variables**")
-        st.dataframe(framed_inputs.head(10), use_container_width=True)
-        st.markdown("**Target variable(s)**")
-        st.dataframe(framed_targets.head(10), use_container_width=True)
+        try:
+            result = train_model(
+                io.BytesIO(data_source_bytes),
+                architecture,
+                preparation,
+                epochs=int(epochs),
+                learning_rate=float(learning_rate),
+                checkpoint_bytes=st.session_state.get("trained_checkpoint"),
+                separator=separator,
+                device=device_choice,
+                on_epoch=update_progress,
+            )
+            st.session_state["trained_checkpoint"] = result["checkpoint_bytes"]
+            st.session_state["checkpoint_signature"] = model_signature
+            st.session_state["training_history"] = result["history"]
+            st.session_state["last_epoch"] = result["completed_epoch"]
+            st.session_state["evaluation_report"] = None
+            progress.progress(1.0)
+            st.success(
+                f"Training reached epoch {result['completed_epoch']} on {result['device']}."
+            )
+        except (ValueError, RuntimeError, OSError) as exc:
+            st.error(f"Training did not finish: {exc}")
 
-        include_data = st.checkbox(
-            "Include the original data source in the project ZIP",
-            value=True,
+    history = st.session_state.get("training_history")
+    if history is not None and not history.empty:
+        st.markdown("**Training history**")
+        st.dataframe(history, hide_index=True, use_container_width=True)
+        st.line_chart(history.set_index("epoch")[["training_loss", "validation_loss"]])
+
+    checkpoint = st.session_state.get("trained_checkpoint")
+    if checkpoint:
+        st.subheader("6. Evaluate the model")
+        split = st.selectbox(
+            "Evaluation data split",
+            ["test", "validation", "train"],
+            key="evaluation_split",
         )
+        if st.button("Evaluate model"):
+            try:
+                report = evaluate_model(
+                    io.BytesIO(data_source_bytes),
+                    architecture,
+                    preparation,
+                    checkpoint,
+                    split=split,
+                    separator=separator,
+                    device=device_choice,
+                )
+                st.session_state["evaluation_report"] = report
+            except (ValueError, RuntimeError, OSError) as exc:
+                st.error(f"Could not evaluate this model: {exc}")
+        report = st.session_state.get("evaluation_report")
+        if report is not None:
+            st.dataframe(report, hide_index=True, use_container_width=True)
+            st.caption(
+                "Q2 is the external predictive coefficient of determination: "
+                "1 - PRESS / sum((observed target - training-set mean)^2). "
+                "R2 uses the evaluated split's own mean. For targets named z, "
+                "redshift, z_spec, zspec, specz, or spec_z, the report also includes "
+                "the ANNz+ photo-z metrics: normalized sigma_RMS, sigma_68, and "
+                "outlier fraction (|delta z| >= 0.15). MAE/RMSE use original target units."
+            )
+
+        st.subheader("7. Generate predictions")
+        prediction_upload = st.file_uploader(
+            "Upload a catalogue containing the selected input columns",
+            type=["csv", "tsv"],
+            key="prediction_upload",
+        )
+        if prediction_upload is not None and st.button("Write prediction file"):
+            prediction_name = prediction_upload.name
+            prediction_separator = "\t" if prediction_name.lower().endswith(".tsv") else ","
+            output_dir = Path.home() / "Documents" / "Galaxy Neural Network Analysis"
+            output_file = output_dir / (
+                f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.csv"
+            )
+            try:
+                result = write_predictions_csv(
+                    io.BytesIO(prediction_upload.getvalue()),
+                    output_file,
+                    architecture,
+                    preparation,
+                    checkpoint,
+                    separator=prediction_separator,
+                    device=device_choice,
+                )
+                st.success(
+                    f"Saved {result['predicted_rows']:,} predictions to {result['path']}. "
+                    f"Skipped {result['skipped_rows']:,} rows with invalid inputs."
+                )
+            except (ValueError, RuntimeError, OSError) as exc:
+                st.error(f"Could not generate predictions: {exc}")
+
+st.subheader("8. Save the project")
+include_data = st.checkbox(
+    "Include the original data source in the project ZIP", value=True
+)
+if st.button("Prepare project ZIP"):
+    if architecture is None:
+        st.error("Choose at least one input and target and valid network settings first.")
+    else:
         project_zip = create_project_zip(
             architecture.to_config_dict(),
-            data_preparation_config=preparation_config,
+            data_preparation_config=preparation.to_config_dict() if preparation else None,
             data_source_name=data_source_name,
             data_source_bytes=data_source_bytes if include_data else None,
             data_source_sha256=data_fingerprint,
             quality_summary=quality_summary,
             sample_correlations=sample_correlations,
+            checkpoint_bytes=st.session_state.get("trained_checkpoint"),
+            training_history=st.session_state.get("training_history"),
         )
-        first, second = st.columns(2)
-        with first:
+        col_a, col_b = st.columns(2)
+        with col_a:
             st.download_button(
                 "Download architecture settings",
                 json.dumps(architecture.to_config_dict(), indent=2),
                 file_name="architecture_config.json",
                 mime="application/json",
             )
-        with second:
+        with col_b:
             st.download_button(
                 "Download project ZIP",
                 project_zip,
@@ -428,10 +533,6 @@ if st.button("Review and save project", type="primary"):
                 mime="application/zip",
             )
         st.info(
-            "The ZIP contains project settings, optional source data under data/, "
-            "analysis reports under analysis/, and preparation settings when ready. "
-            "It does not contain trained weights or training progress yet."
+            "The ZIP includes the network and data settings, available analysis reports, "
+            "optional source data, and a resumable model checkpoint when training has begun."
         )
-    except (ValueError, KeyError) as exc:
-        st.error(str(exc))
-

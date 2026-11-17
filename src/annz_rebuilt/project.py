@@ -13,13 +13,13 @@ import zipfile
 import pandas as pd
 
 
-PROJECT_FORMAT_VERSION = 3
+PROJECT_FORMAT_VERSION = 4
 MANIFEST_NAME = "project.json"
 
 
 @dataclass(frozen=True)
 class ProjectArchive:
-    """Settings, optional source data, preparation, and analysis reports."""
+    """Project configuration, optional source data, reports, and model progress."""
 
     architecture: dict[str, Any]
     data_preparation: dict[str, Any] | None
@@ -28,6 +28,8 @@ class ProjectArchive:
     data_source_sha256: str | None
     quality_summary: pd.DataFrame | None
     sample_correlations: pd.DataFrame | None
+    checkpoint_bytes: bytes | None
+    training_history: pd.DataFrame | None
 
 
 def _safe_archive_path(value: str) -> str:
@@ -47,11 +49,12 @@ def create_project_zip(
     data_source_sha256: str | None = None,
     quality_summary: pd.DataFrame | None = None,
     sample_correlations: pd.DataFrame | None = None,
+    checkpoint_bytes: bytes | None = None,
+    training_history: pd.DataFrame | None = None,
 ) -> bytes:
-    """Package settings, optional source data, preparation, and analysis reports."""
+    """Package settings, optional data, analysis reports, and model checkpoint."""
     if data_source_bytes is not None and data_source_name is None:
         raise ValueError("A data source filename is required when including its contents.")
-
     safe_name = PurePosixPath((data_source_name or "").replace("\\", "/")).name
     if data_source_name is not None and (not safe_name or safe_name in {".", ".."}):
         raise ValueError("The data source filename is invalid.")
@@ -60,14 +63,10 @@ def create_project_zip(
 
     files = {
         "data_source": f"data/{safe_name}" if data_source_bytes is not None else None,
-        "quality_summary": (
-            "analysis/data_quality_summary.csv" if quality_summary is not None else None
-        ),
-        "sample_correlations": (
-            "analysis/sample_correlations.csv"
-            if sample_correlations is not None
-            else None
-        ),
+        "quality_summary": "analysis/data_quality_summary.csv" if quality_summary is not None else None,
+        "sample_correlations": "analysis/sample_correlations.csv" if sample_correlations is not None else None,
+        "training_checkpoint": "training/checkpoint.pt" if checkpoint_bytes is not None else None,
+        "training_history": "training/history.csv" if training_history is not None else None,
     }
     manifest = {
         "format_version": PROJECT_FORMAT_VERSION,
@@ -76,13 +75,13 @@ def create_project_zip(
         "data_source_name": safe_name or None,
         "data_source_sha256": data_source_sha256,
         "files": files,
-        "training_checkpoint_included": False,
+        "training_checkpoint_included": checkpoint_bytes is not None,
     }
 
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(MANIFEST_NAME, json.dumps(manifest, indent=2) + "\n")
-        if data_source_bytes is not None and files["data_source"]:
+        if data_source_bytes is not None:
             archive.writestr(files["data_source"], data_source_bytes)
         if quality_summary is not None:
             archive.writestr(
@@ -94,27 +93,33 @@ def create_project_zip(
                 files["sample_correlations"],
                 sample_correlations.to_csv(index=True, lineterminator="\n"),
             )
+        if checkpoint_bytes is not None:
+            archive.writestr(files["training_checkpoint"], checkpoint_bytes)
+        if training_history is not None:
+            archive.writestr(
+                files["training_history"],
+                training_history.to_csv(index=False, lineterminator="\n"),
+            )
         archive.writestr(
             "README.txt",
             "Galaxy neural-network analysis project\n"
-            "project.json stores selected variables, network settings, and preparation.\n"
-            "data/ contains the original data source when included.\n"
-            "analysis/ contains data-quality statistics and sample correlations when available.\n"
-            "Trained weights and training checkpoints are not included in this prototype.\n",
+            "project.json stores network and data-preparation settings.\n"
+            "data/ contains the original source when included.\n"
+            "analysis/ contains data-quality and exploratory reports.\n"
+            "training/ contains model weights, optimizer progress, and loss history when available.\n",
         )
     return output.getvalue()
 
 
 def open_project_zip(zip_bytes: bytes) -> ProjectArchive:
-    """Read a project ZIP, including optional data, preparation, and analysis."""
+    """Read a project ZIP created by this app or an earlier supported version."""
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as archive:
             names = set(archive.namelist())
             if MANIFEST_NAME not in names:
                 raise ValueError("This ZIP has no project.json manifest.")
             manifest = json.loads(archive.read(MANIFEST_NAME).decode("utf-8"))
-            version = manifest.get("format_version")
-            if version not in {1, 2, PROJECT_FORMAT_VERSION}:
+            if manifest.get("format_version") not in {1, 2, 3, PROJECT_FORMAT_VERSION}:
                 raise ValueError("This project uses an unsupported format version.")
             architecture = manifest.get("architecture")
             if not isinstance(architecture, dict):
@@ -122,10 +127,10 @@ def open_project_zip(zip_bytes: bytes) -> ProjectArchive:
             preparation = manifest.get("data_preparation")
             if preparation is not None and not isinstance(preparation, dict):
                 raise ValueError("The project data-preparation settings are invalid.")
-
             files = manifest.get("files", {})
             if not isinstance(files, dict):
                 files = {}
+
             data_path = files.get("data_source") or manifest.get("catalogue_path")
             data_name = manifest.get("data_source_name")
             data_bytes = None
@@ -137,9 +142,9 @@ def open_project_zip(zip_bytes: bytes) -> ProjectArchive:
                     raise ValueError("The source data listed in the manifest is missing.")
                 data_name = PurePosixPath(data_path).name
                 data_bytes = archive.read(data_path)
-                expected_hash = manifest.get("data_source_sha256")
-                if expected_hash and hashlib.sha256(data_bytes).hexdigest() != expected_hash:
-                    raise ValueError("The source data in the ZIP does not match its recorded checksum.")
+                expected = manifest.get("data_source_sha256")
+                if expected and hashlib.sha256(data_bytes).hexdigest() != expected:
+                    raise ValueError("The source data does not match its recorded checksum.")
             elif data_name is not None and not isinstance(data_name, str):
                 raise ValueError("The source data filename in the manifest is invalid.")
 
@@ -149,11 +154,15 @@ def open_project_zip(zip_bytes: bytes) -> ProjectArchive:
                 data_source_name=data_name,
                 data_source_bytes=data_bytes,
                 data_source_sha256=manifest.get("data_source_sha256"),
-                quality_summary=_read_csv_member(
-                    archive, names, files.get("quality_summary")
-                ),
+                quality_summary=_read_csv_member(archive, names, files.get("quality_summary")),
                 sample_correlations=_read_csv_member(
                     archive, names, files.get("sample_correlations"), index_col=0
+                ),
+                checkpoint_bytes=_read_bytes_member(
+                    archive, names, files.get("training_checkpoint")
+                ),
+                training_history=_read_csv_member(
+                    archive, names, files.get("training_history")
                 ),
             )
     except zipfile.BadZipFile as exc:
@@ -162,8 +171,19 @@ def open_project_zip(zip_bytes: bytes) -> ProjectArchive:
         raise ValueError("The project manifest could not be read.") from exc
 
 
+def _read_bytes_member(archive, names: set[str], archive_path: Any) -> bytes | None:
+    if archive_path is None:
+        return None
+    if not isinstance(archive_path, str):
+        raise ValueError("A checkpoint path in the project is invalid.")
+    safe_path = _safe_archive_path(archive_path)
+    if safe_path not in names:
+        raise ValueError(f"The project member {safe_path} is missing.")
+    return archive.read(safe_path)
+
+
 def _read_csv_member(
-    archive: zipfile.ZipFile,
+    archive,
     names: set[str],
     archive_path: Any,
     *,
@@ -175,5 +195,5 @@ def _read_csv_member(
         raise ValueError("An analysis report path in the project is invalid.")
     safe_path = _safe_archive_path(archive_path)
     if safe_path not in names:
-        raise ValueError(f"The analysis report {safe_path} is missing from the ZIP.")
+        raise ValueError(f"The project member {safe_path} is missing.")
     return pd.read_csv(io.BytesIO(archive.read(safe_path)), index_col=index_col)

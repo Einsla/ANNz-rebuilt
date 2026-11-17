@@ -9,13 +9,16 @@ def analyze_catalogue_csv(
     source: str | Path | BinaryIO,
     *,
     separator: str | None = ",",
-    rows_per_batch: int = 100_000,
+    rows_per_batch: int = 50_000,
     sample_columns: Sequence[str] = (),
     max_sample_rows: int = 20_000,
 ) -> tuple[pd.DataFrame, pd.DataFrame, int]:
     """Profile the CSV in chunks; return summary, exploratory sample, and row count."""
     if rows_per_batch < 1 or max_sample_rows < 1:
         raise ValueError("Batch and sample sizes must be positive.")
+
+    if hasattr(source, "seek"):
+        source.seek(0)
 
     accumulators: dict[str, dict[str, float | int]] = {}
     samples: list[pd.DataFrame] = []
@@ -52,7 +55,16 @@ def analyze_catalogue_csv(
 
             chosen = [name for name in sample_names if name in batch.columns]
             if chosen and len(batch):
-                samples.append(batch.loc[:, chosen].sample(n=min(100, len(batch)), random_state=row_count % (2**32)))
+                # Keep the exploratory sample bounded while scanning very large catalogues.
+                candidate = batch.loc[:, chosen].sample(
+                    n=min(100, len(batch)), random_state=row_count % (2**32)
+                )
+                samples.append(candidate)
+                if sum(len(part) for part in samples) > max_sample_rows:
+                    combined = pd.concat(samples, ignore_index=True)
+                    samples = [
+                        combined.sample(n=max_sample_rows, random_state=42).reset_index(drop=True)
+                    ]
     finally:
         reader.close()
 
@@ -78,4 +90,3 @@ def analyze_catalogue_csv(
     if len(sample) > max_sample_rows:
         sample = sample.sample(n=max_sample_rows, random_state=42)
     return pd.DataFrame(output), sample.reset_index(drop=True), row_count
-
