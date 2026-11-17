@@ -2,55 +2,88 @@
 
 ## Project overview
 
-This project investigates and rebuilds the legacy [ANNzPlus](https://github.com/imdadmpt/ANNzPlus) photometric-redshift workflow in Python. ANNzPlus extends ANNz for estimating galaxy photometric redshifts with configurable neural networks.
+This project investigates and rebuilds the legacy [ANNzPlus](https://github.com/imdadmpt/ANNzPlus) photometric-redshift workflow in Python. It provides a local Streamlit interface for catalogue analysis, neural-network architecture design, training, evaluation, prediction, and reusable project archives.
 
-The rebuild is a local research prototype. It includes batched catalogue analysis and preparation, configurable fully connected regression networks, mini-batch training, validation/test metrics, prediction export, and portable project ZIP files with resumable training checkpoints. Matching legacy behavior and scientific performance still requires controlled comparison against the original software and suitable reference data.
+This is a research rebuild, not a claim of bit-for-bit or scientific equivalence with the original C++ implementation. See [ANNZPLUS_PARITY.md](ANNZPLUS_PARITY.md) for confirmed differences and remaining parity work.
 
-## Research objective
+## Windows installation (recommended)
 
-Determine how faithfully the core ANNzPlus photometric-redshift workflow can be reproduced in Python, then compare predictions under matched input variables, data splits, and model settings. Report the results using defined accuracy metrics and document differences from the legacy system.
+Requirements:
 
-## Current local workflow
+- Windows 10 or 11, 64-bit.
+- Python 3.9 or newer, with the Python Launcher recommended.
+- Internet access during installation.
+- An NVIDIA GPU is optional; CPU execution is supported.
 
-1. Upload a CSV/TSV galaxy catalogue and choose the input and target variables.
-2. Scan the catalogue in chunks for data quality and exploratory summary statistics.
-3. Prepare deterministic training, validation, and test splits. Invalid selected rows are skipped, and scaling is fitted from training rows only.
-4. Configure hidden-layer sizes and an activation function.
-5. Train in mini-batches, review training/validation loss, and continue from a saved checkpoint.
-6. Evaluate using MAE, RMSE, and R-squared, and write predictions for another catalogue.
-7. Save the settings, optional source data, analysis reports, training history, and checkpoint in a project ZIP.
+1. Download the repository using GitHub's **Code → Download ZIP**, or clone it.
+2. Extract the complete folder to a location you can write to.
+3. Double-click **Install_ANNzPlus.bat**.
+4. Wait for the installer to create a local `.venv`, install PyTorch and the app dependencies, and create desktop and Start Menu shortcuts.
+5. Launch **ANNzPlus Python** from the desktop, or double-click **Run_ANNzPlus.bat** in the project folder.
 
-## Run the local app
+The installer detects an NVIDIA GPU using `nvidia-smi`. It installs a CUDA 12.8 PyTorch wheel when an NVIDIA GPU is detected and a CPU-only PyTorch wheel otherwise. The actual wheel is selected by pip for the installed Python version. No Python packages or virtual-environment files are committed to GitHub; this avoids shipping multi-gigabyte, hardware-specific binaries.
+
+If shortcut creation is blocked by Windows policy, the app remains launchable through `Run_ANNzPlus.bat`.
+
+## Manual installation
 
 From the repository root:
 
-    python install.py
-    python -m streamlit run app.py
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe install.py
+.venv\Scripts\python.exe -m streamlit run app.py
+```
 
-The installer uses the current Python interpreter and installs the project plus
-its declared dependencies from `pyproject.toml`. This is the recommended
-hardware-aware installation route. If you have already selected the correct
-PyTorch build for your machine, `python -m pip install .` installs the project
-and resolves any remaining runtime libraries (NumPy, pandas, PyTorch, and
-Streamlit).
+For development and tests:
 
-The installer detects an NVIDIA GPU and selects a CUDA-enabled PyTorch wheel; otherwise it installs the CPU build. The app uses CUDA when PyTorch can access a compatible GPU and falls back to CPU when requested or when CUDA is unavailable. Catalogue processing defaults to 50,000-row CPU chunks and 512-row model mini-batches; adjust these values for your available system memory and GPU VRAM.
+```powershell
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\python.exe -m pytest
+.venv\Scripts\python.exe -m ruff check .
+```
+
+## Current workflow
+
+1. Upload a CSV or TSV galaxy catalogue with a header row.
+2. Select input variables and target variable(s).
+3. Scan the catalogue in chunks for missing, non-numeric, infinite, and finite values; review summary statistics and exploratory correlations.
+4. Prepare deterministic training, validation, and test splits. Invalid selected rows are excluded, and scaling is fitted on training rows only.
+5. Describe the network by choosing hidden-layer widths and an activation function.
+6. Optimise candidate architectures using validation loss. Automatic and manual candidate layouts are supported.
+7. Train or continue with Adam mini-batches or full-batch L-BFGS. Validation loss is monitored for candidate selection and early stopping.
+8. Evaluate using MAE, RMSE, predictive Q-squared, R-squared, and ANNz+ photo-z metrics for recognised redshift targets.
+9. Generate predictions for another catalogue and export them as CSV.
+10. Save a reusable settings ZIP or a full project ZIP with optional source data.
+
+The test split is held out from architecture and hyperparameter selection. It should be used for final assessment after model choices have been fixed.
+
+## Optimisers
+
+- **Adam:** mini-batch gradient optimisation with an explicit learning-rate setting. Each epoch passes through the full training split; batches are shuffled within source chunks using a reproducible epoch-specific seed.
+- **L-BFGS:** full-batch quasi-Newton optimisation with an internal line search. It materialises the training and validation splits and can require substantially more memory. It is conceptually similar to the legacy ANNzPlus variable-metric optimiser, but it is not an exact port of the original `vmmin()` implementation.
+
+The installer selects a CUDA-enabled PyTorch build for NVIDIA systems and a CPU-only build otherwise. The app can also be configured to use CPU if GPU memory is insufficient.
 
 ## Project ZIP
 
 A project ZIP can contain:
 
-- `project.json`: selected variables, network configuration, split settings, and training-only scaling.
-- `data/<filename>`: original uploaded data, if included.
-- `analysis/`: data-quality and exploratory correlation reports, if available.
-- `training/checkpoint.pt`: network weights, optimizer state, and epoch history, if training has started.
-- `training/history.csv`: training and validation loss by epoch.
+- `project.json`: architecture, split settings, training configuration, and scaling values.
+- `data/`: original uploaded data, if included.
+- `analysis/`: data-quality and exploratory reports.
+- `training/checkpoint.pt`: model weights and optimiser state.
+- `training/history.csv`: training and validation loss history.
+- `training/optimisation_results.csv`: ranked candidate results.
 
-Open a project ZIP in the app to restore its settings and continue training. If the source data was not included, upload the identical file to reuse its saved preparation settings and checkpoint.
+Open a project ZIP in the app to restore its settings and continue training. If the source data was not included, upload the identical file; the app uses its SHA-256 fingerprint to protect saved scaling, split assignments, and checkpoints from accidental reuse with a different catalogue.
 
-## Current limitations
+## Quality checks
 
-The local Streamlit uploader holds the uploaded source bytes in memory, even though catalogue processing and model training use bounded batches. Very large files may need a future direct-from-disk input flow. Prediction output is written to the user's Documents folder under `Galaxy Neural Network Analysis`. Neural-network results have not yet been validated against legacy ANNzPlus. The app is a research prototype and does not establish scientific equivalence by itself.
+The repository includes automated tests for architecture validation, deterministic splits and shuffling, multi-target training-loss reporting, Adam and L-BFGS training, checkpoint continuation, metrics, prediction export, and project ZIP validation.
+
+Run them with `python -m pytest`. Run static checks with `python -m ruff check .`.
 
 ## Research references
 

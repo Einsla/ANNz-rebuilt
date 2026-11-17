@@ -1,9 +1,32 @@
 # Local app quick start
 
-This Streamlit application runs on your computer. Install the dependencies and start it from the repository folder:
+## Windows installation
 
-    python -m pip install -r requirements.txt
-    python -m streamlit run app.py
+1. Download and extract the complete repository.
+2. Double-click `Install_ANNzPlus.bat`.
+3. The installer creates an isolated `.venv`, installs the hardware-appropriate PyTorch wheel and project dependencies, and creates desktop and Start Menu shortcuts.
+4. Launch **ANNzPlus Python** from the desktop, or double-click `Run_ANNzPlus.bat`.
+
+Python 3.9 or newer and an internet connection are required for the first installation. NVIDIA systems use the CUDA 12.8 PyTorch package when `nvidia-smi` detects a GPU; otherwise the CPU-only PyTorch package is installed. No virtual environment or large binary dependency is stored in GitHub.
+
+## Manual setup
+
+From the repository root:
+
+```powershell
+py -3 -m venv .venv
+.venv\Scripts\python.exe -m pip install --upgrade pip
+.venv\Scripts\python.exe install.py
+.venv\Scripts\python.exe -m streamlit run app.py
+```
+
+For development:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\python.exe -m pytest
+.venv\Scripts\python.exe -m ruff check .
+```
 
 ## Workflow
 
@@ -13,16 +36,16 @@ This Streamlit application runs on your computer. Install the dependencies and s
 4. Prepare deterministic training, validation, and test splits. Invalid rows are excluded; input and target scaling is fitted from training rows only.
 5. Configure a manual network, or choose **Automatic** in the optimisation section to generate candidate hidden-layer layouts. Choose **Manual** if you want to supply your own layouts.
 6. Choose Adam or L-BFGS (quasi-Newton), then compare layouts and activation functions. Adam candidates can also compare learning rates. Each candidate starts from fresh weights, is ranked using validation loss, and uses early stopping. The search is capped at 24 candidates.
-7. Train or continue the selected network with the chosen optimiser. Adam uses mini-batches and epochs; L-BFGS uses full-batch optimisation iterations.
+7. Train or continue the selected network. Adam uses mini-batches and epochs; L-BFGS uses full-batch optimisation iterations.
 8. Evaluate on the validation or test split using MAE, RMSE, predictive Q-squared, R-squared, and the ANNz+ photo-z metrics when the target is a recognised redshift column.
 9. Upload a catalogue with the selected input columns to write predictions as a CSV.
 10. Download a reusable settings ZIP or a full project ZIP.
 
-**Important:** Use validation results for model selection. Keep the test split for the final assessment after the architecture and hyperparameters have been chosen. The optimiser does not inspect the test split.
+**Important:** Use validation results for model selection. Keep the test split for final assessment after the architecture and hyperparameters have been chosen. The optimiser does not inspect the test split.
 
-Optimisers: Adam is the default mini-batch optimiser and uses a learning-rate setting. L-BFGS is a full-batch quasi-Newton option; it chooses step lengths internally and therefore does not use the Adam learning-rate field. L-BFGS can require substantially more memory because it evaluates the full training split together. If CUDA runs out of memory, select CPU or use Adam with mini-batches. The L-BFGS implementation is PyTorch's implementation and is conceptually similar to, but not an exact reproduction of, legacy ANNzPlus vmmin().
+## Optimisers
 
-PyTorch chooses a CUDA GPU when one is available in the Python environment. The CPU can be selected as a fallback.
+Adam is the default mini-batch optimiser and uses a learning-rate setting. Training batches are shuffled within source chunks using a reproducible but epoch-specific seed. L-BFGS is a full-batch quasi-Newton option; it chooses step lengths internally and therefore does not use the Adam learning-rate field. L-BFGS can require substantially more memory because it evaluates the full training split together. If CUDA runs out of memory, select CPU or use Adam. The L-BFGS implementation is PyTorch's implementation and is conceptually similar to, but not an exact reproduction of, legacy ANNzPlus `vmmin()`.
 
 ## Reusable architecture/settings ZIP
 
@@ -52,7 +75,9 @@ The archive contains a versioned `project.json` manifest, a README, and optional
 
 Generated predictions are saved in:
 
-    <Documents>/Galaxy Neural Network Analysis/
+```
+<Documents>/Galaxy Neural Network Analysis/
+```
 
 The CSV contains the source row number and one predicted column for each target variable. Rows with missing, non-numeric, or infinite selected inputs are skipped.
 

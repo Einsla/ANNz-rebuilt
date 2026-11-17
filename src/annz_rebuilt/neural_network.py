@@ -1,4 +1,5 @@
 """Batched neural-network training, evaluation, checkpointing, and prediction."""
+
 from __future__ import annotations
 
 import io
@@ -18,7 +19,9 @@ def _torch():
         import torch
         from torch import nn
     except ImportError as exc:
-        raise RuntimeError("Install the dependencies in requirements.txt to train a network.") from exc
+        raise RuntimeError(
+            "Install the dependencies in requirements.txt to train a network."
+        ) from exc
     return torch, nn
 
 
@@ -32,7 +35,7 @@ def _device(torch, requested: str):
 
 def build_network(architecture: Architecture):
     """Make a fully connected regression network from the saved layer settings."""
-    torch, nn = _torch()
+    _, nn = _torch()
     activations = {
         "leaky_relu": lambda: nn.LeakyReLU(0.01),
         "relu": nn.ReLU,
@@ -47,7 +50,9 @@ def build_network(architecture: Architecture):
     layers = []
     width = architecture.n_inputs
     for next_width in architecture.hidden_layers:
-        layers.extend((nn.Linear(width, next_width), activations[architecture.activation]()))
+        layers.extend(
+            (nn.Linear(width, next_width), activations[architecture.activation]())
+        )
         width = next_width
     layers.append(nn.Linear(width, architecture.n_outputs))
     return nn.Sequential(*layers)
@@ -69,11 +74,21 @@ def _read_checkpoint(blob: bytes, torch, device, signature: str):
     if not isinstance(state, dict):
         raise ValueError("The checkpoint has an invalid structure.")
     if state.get("signature") != signature:
-        raise ValueError("Checkpoint settings do not match this network and prepared dataset.")
+        raise ValueError(
+            "Checkpoint settings do not match this network and prepared dataset."
+        )
     return state
 
 
-def _pack_checkpoint(torch, model, optimizer, epoch: int, signature: str, history: list[dict], optimizer_name: str = "adam") -> bytes:
+def _pack_checkpoint(
+    torch,
+    model,
+    optimizer,
+    epoch: int,
+    signature: str,
+    history: list[dict],
+    optimizer_name: str = "adam",
+) -> bytes:
     buffer = io.BytesIO()
     torch.save(
         {
@@ -99,7 +114,9 @@ def _restore_model(blob: bytes, architecture, preparation, torch, device):
     return model, state
 
 
-def _validation_loss(model, source, preparation, separator, torch, device) -> float | None:
+def _validation_loss(
+    model, source, preparation, separator, torch, device
+) -> float | None:
     total = 0.0
     rows = 0
     model.eval()
@@ -116,10 +133,18 @@ def _validation_loss(model, source, preparation, separator, torch, device) -> fl
     return total / (rows * len(preparation.target_columns)) if rows else None
 
 
-
 def _train_lbfgs(
-    source, architecture, preparation, *, epochs, checkpoint_bytes, separator,
-    device, early_stopping_patience, on_epoch, history_size,
+    source,
+    architecture,
+    preparation,
+    *,
+    epochs,
+    checkpoint_bytes,
+    separator,
+    device,
+    early_stopping_patience,
+    on_epoch,
+    history_size,
 ):
     """Train with full-batch L-BFGS (a quasi-Newton method).
 
@@ -132,7 +157,10 @@ def _train_lbfgs(
     torch.manual_seed(preparation.random_seed)
     model = build_network(architecture).to(target_device)
     optimizer = torch.optim.LBFGS(
-        model.parameters(), lr=1.0, max_iter=1, history_size=history_size,
+        model.parameters(),
+        lr=1.0,
+        max_iter=1,
+        history_size=history_size,
         line_search_fn="strong_wolfe",
     )
     signature = _signature(architecture, preparation)
@@ -158,9 +186,9 @@ def _train_lbfgs(
         )
 
     def collect(split):
-        batches = list(iter_prepared_batches(
-            source, preparation, split=split, separator=separator
-        ))
+        batches = list(
+            iter_prepared_batches(source, preparation, split=split, separator=separator)
+        )
         if not batches:
             return None, None
         x_np = np.concatenate([item[0] for item in batches], axis=0)
@@ -182,9 +210,9 @@ def _train_lbfgs(
             return None
         model.eval()
         with torch.no_grad():
-            return float(torch.nn.functional.mse_loss(
-                model(validation_x), validation_y
-            ).item())
+            return float(
+                torch.nn.functional.mse_loss(model(validation_x), validation_y).item()
+            )
 
     latest = checkpoint_bytes
     best_checkpoint = checkpoint_bytes
@@ -209,9 +237,9 @@ def _train_lbfgs(
         optimizer.step(closure)
         model.eval()
         with torch.no_grad():
-            train_loss = float(torch.nn.functional.mse_loss(
-                model(train_x), train_y
-            ).item())
+            train_loss = float(
+                torch.nn.functional.mse_loss(model(train_x), train_y).item()
+            )
         val_loss = validation_loss()
         record = {
             "epoch": iteration,
@@ -231,10 +259,13 @@ def _train_lbfgs(
         elif early_stopping_patience is not None and val_loss is not None:
             no_improvement += 1
         if on_epoch:
-            on_epoch({
-                **record, "checkpoint_bytes": latest,
-                "device": str(target_device),
-            })
+            on_epoch(
+                {
+                    **record,
+                    "checkpoint_bytes": latest,
+                    "device": str(target_device),
+                }
+            )
         if (
             early_stopping_patience is not None
             and val_loss is not None
@@ -248,7 +279,9 @@ def _train_lbfgs(
         "checkpoint_bytes": selected or latest,
         "history": pd.DataFrame(history),
         "completed_epoch": completed_epoch,
-        "best_epoch": best_epoch if best_epoch > first_epoch else completed_epoch,
+        "best_epoch": (
+            best_epoch if best_validation_loss < float("inf") else completed_epoch
+        ),
         "best_validation_loss": (
             best_validation_loss if best_validation_loss < float("inf") else None
         ),
@@ -274,10 +307,12 @@ def train_model(
 ) -> dict:
     """Train with Adam mini-batches or full-batch L-BFGS quasi-Newton."""
     optimizer_name = optimizer_name.strip().lower().replace("-", "")
-    if optimizer_name in {"quasinewton", "l-bfgs", "lbfgs"}:
+    if optimizer_name in {"quasinewton", "lbfgs"}:
         optimizer_name = "lbfgs"
     if optimizer_name not in {"adam", "lbfgs"}:
         raise ValueError("Choose Adam or L-BFGS (quasi-Newton).")
+    if early_stopping_patience is not None and early_stopping_patience < 1:
+        raise ValueError("Early-stopping patience must be at least one.")
     if optimizer_name == "lbfgs":
         if epochs < 1 or lbfgs_history_size < 1:
             raise ValueError("Iterations and L-BFGS history size must be positive.")
@@ -288,15 +323,19 @@ def train_model(
         if early_stopping_patience is not None and preparation.validation_fraction <= 0:
             raise ValueError("Early stopping requires a non-empty validation split.")
         return _train_lbfgs(
-            source, architecture, preparation, epochs=epochs,
-            checkpoint_bytes=checkpoint_bytes, separator=separator, device=device,
-            early_stopping_patience=early_stopping_patience, on_epoch=on_epoch,
+            source,
+            architecture,
+            preparation,
+            epochs=epochs,
+            checkpoint_bytes=checkpoint_bytes,
+            separator=separator,
+            device=device,
+            early_stopping_patience=early_stopping_patience,
+            on_epoch=on_epoch,
             history_size=lbfgs_history_size,
         )
-    if epochs < 1 or learning_rate <= 0:
-        raise ValueError("Epochs and learning rate must be positive.")
-    if early_stopping_patience is not None and early_stopping_patience < 1:
-        raise ValueError("Early-stopping patience must be at least one.")
+    if epochs < 1 or not np.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError("Epochs and learning rate must be positive and finite.")
     if tuple(architecture.input_columns) != preparation.input_columns:
         raise ValueError("Network inputs do not match the prepared data.")
     if tuple(architecture.target_columns) != preparation.target_columns:
@@ -349,7 +388,11 @@ def train_model(
         loss_sum = 0.0
         row_count = 0
         for x_np, y_np in iter_prepared_batches(
-            source, preparation, split="train", separator=separator
+            source,
+            preparation,
+            split="train",
+            separator=separator,
+            shuffle_seed=preparation.random_seed + epoch,
         ):
             if not len(x_np):
                 continue
@@ -359,6 +402,8 @@ def train_model(
             loss = nn.functional.mse_loss(model(x), y)
             loss.backward()
             optimizer.step()
+            # PyTorch's mean MSE is already averaged over rows and targets.
+            # Weight by batch rows, then divide by total rows (not rows ? targets).
             loss_sum += loss.detach().item() * len(x_np)
             row_count += len(x_np)
         if row_count == 0:
@@ -368,11 +413,13 @@ def train_model(
         )
         record = {
             "epoch": epoch,
-            "training_loss": loss_sum / (row_count * len(preparation.target_columns)),
+            "training_loss": loss_sum / row_count,
             "validation_loss": validation_loss,
         }
         history.append(record)
-        latest = _pack_checkpoint(torch, model, optimizer, epoch, signature, history, "adam")
+        latest = _pack_checkpoint(
+            torch, model, optimizer, epoch, signature, history, "adam"
+        )
         completed_epoch = epoch
         if validation_loss is not None and validation_loss < best_validation_loss:
             best_validation_loss = validation_loss
@@ -382,7 +429,9 @@ def train_model(
         elif early_stopping_patience is not None and validation_loss is not None:
             epochs_without_improvement += 1
         if on_epoch:
-            on_epoch({**record, "checkpoint_bytes": latest, "device": str(target_device)})
+            on_epoch(
+                {**record, "checkpoint_bytes": latest, "device": str(target_device)}
+            )
         if (
             early_stopping_patience is not None
             and validation_loss is not None
@@ -391,14 +440,18 @@ def train_model(
             stopped_early = True
             break
 
-    selected_checkpoint = best_checkpoint if early_stopping_patience is not None else latest
+    selected_checkpoint = (
+        best_checkpoint if early_stopping_patience is not None else latest
+    )
     if selected_checkpoint is None:
         selected_checkpoint = latest
     return {
         "checkpoint_bytes": selected_checkpoint,
         "history": pd.DataFrame(history),
         "completed_epoch": completed_epoch,
-        "best_epoch": best_epoch if best_epoch > first_epoch else completed_epoch,
+        "best_epoch": (
+            best_epoch if best_validation_loss < float("inf") else completed_epoch
+        ),
         "best_validation_loss": (
             best_validation_loss if best_validation_loss < float("inf") else None
         ),
@@ -430,14 +483,18 @@ def evaluate_model(
     aliases = {"z", "redshift", "z_spec", "zspec", "specz", "spec_z"}
     if redshift_targets is None:
         photoz_names = {
-            name for name in architecture.target_columns
+            name
+            for name in architecture.target_columns
             if name.strip().lower() in aliases
         }
     else:
         photoz_names = set(redshift_targets)
         unknown = photoz_names.difference(architecture.target_columns)
         if unknown:
-            raise ValueError("Redshift metrics requested for non-target columns: " + ", ".join(sorted(unknown)))
+            raise ValueError(
+                "Redshift metrics requested for non-target columns: "
+                + ", ".join(sorted(unknown))
+            )
     torch, _ = _torch()
     target_device = _device(torch, device)
     model, _ = _restore_model(
@@ -490,16 +547,22 @@ def evaluate_model(
             "rows": count,
             "MAE": abs_error[i] / count,
             "RMSE": np.sqrt(sq_error[i] / count),
-            "R2": 1 - sq_error[i] / split_total[i] if split_total[i] > 0 else float("nan"),
+            "R2": 1 - sq_error[i] / split_total[i]
+            if split_total[i] > 0
+            else float("nan"),
             "Q2": 1 - sq_error[i] / q2_total[i] if q2_total[i] > 0 else float("nan"),
         }
         if name in photoz_names:
             delta = np.concatenate(photoz_residuals[name])
-            row.update({
-                "sigma_RMS": float(np.sqrt(np.mean(np.square(delta)))),
-                "sigma_68": float((np.quantile(delta, 0.841) - np.quantile(delta, 0.159)) / 2.0),
-                "outlier_fraction_percent": 100.0 * outlier_counts[name] / count,
-            })
+            row.update(
+                {
+                    "sigma_RMS": float(np.sqrt(np.mean(np.square(delta)))),
+                    "sigma_68": float(
+                        (np.quantile(delta, 0.841) - np.quantile(delta, 0.159)) / 2.0
+                    ),
+                    "outlier_fraction_percent": 100.0 * outlier_counts[name] / count,
+                }
+            )
         result.append(row)
     return pd.DataFrame(result)
 
@@ -532,13 +595,19 @@ def write_predictions_csv(
             for chunk in reader:
                 chunk.columns = [str(c).lstrip("#").strip() for c in chunk.columns]
                 if len(set(chunk.columns)) != len(chunk.columns):
-                    raise ValueError("Prediction column names must be unique after removing a leading #.")
-                missing = [c for c in architecture.input_columns if c not in chunk.columns]
+                    raise ValueError(
+                        "Prediction column names must be unique after removing a leading #."
+                    )
+                missing = [
+                    c for c in architecture.input_columns if c not in chunk.columns
+                ]
                 if missing:
                     raise ValueError("Missing input variables: " + ", ".join(missing))
-                values = chunk.loc[:, list(architecture.input_columns)].apply(
-                    pd.to_numeric, errors="coerce"
-                ).to_numpy(dtype="float64", na_value=np.nan)
+                values = (
+                    chunk.loc[:, list(architecture.input_columns)]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .to_numpy(dtype="float64", na_value=np.nan)
+                )
                 valid = np.isfinite(values).all(axis=1)
                 source_rows = np.arange(offset + 1, offset + len(chunk) + 1)[valid]
                 offset += len(chunk)
@@ -553,12 +622,8 @@ def write_predictions_csv(
                 # Prediction must obey the same GPU mini-batch limit as training.
                 for start in range(0, len(valid_values), preparation.batch_size):
                     end = min(start + preparation.batch_size, len(valid_values))
-                    x_np = (
-                        valid_values[start:end] - input_mean
-                    ) / input_scale
-                    x = torch.as_tensor(
-                        x_np, dtype=torch.float32, device=target_device
-                    )
+                    x_np = (valid_values[start:end] - input_mean) / input_scale
+                    x = torch.as_tensor(x_np, dtype=torch.float32, device=target_device)
                     with torch.no_grad():
                         y[start:end] = model(x).cpu().numpy().astype(np.float64)
                 y = y * np.asarray(preparation.target_scale) + np.asarray(

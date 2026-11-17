@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import math
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import BinaryIO, Iterator, Sequence
 
 import numpy as np
 import pandas as pd
-
 
 SPLITS = ("train", "validation", "test")
 
@@ -78,7 +77,9 @@ def _read_chunks(
         for chunk in reader:
             chunk.columns = [str(name).lstrip("#").strip() for name in chunk.columns]
             if len(set(chunk.columns)) != len(chunk.columns):
-                raise ValueError("Column names must be unique after removing a leading #.")
+                raise ValueError(
+                    "Column names must be unique after removing a leading #."
+                )
             yield chunk
     finally:
         reader.close()
@@ -143,7 +144,9 @@ def _mean_and_scale(
     # Match ANNz+'s sample-standard-deviation convention (N-1 denominator).
     # Scaling is still fitted on the training split only to avoid validation leakage.
     if count > 1:
-        variance = np.maximum((sum_squares - count * np.square(mean)) / (count - 1), 0.0)
+        variance = np.maximum(
+            (sum_squares - count * np.square(mean)) / (count - 1), 0.0
+        )
     else:
         variance = np.zeros_like(mean)
     scale = np.sqrt(variance)
@@ -266,8 +269,14 @@ def iter_prepared_batches(
     split: str = "train",
     batch_size: int | None = None,
     separator: str | None = ",",
+    shuffle_seed: int | None = None,
 ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """Yield normalized input and target arrays for one split in bounded batches."""
+    """Yield normalized input and target arrays for one split in bounded batches.
+
+    Rows are shuffled within each source chunk. Supplying a different
+    shuffle_seed each epoch changes mini-batch order while remaining
+    reproducible for a fixed seed and catalogue.
+    """
     if batch_size is None:
         batch_size = preparation.batch_size
     if split not in SPLITS:
@@ -276,7 +285,10 @@ def iter_prepared_batches(
         raise ValueError("Batch size must be at least 1.")
 
     split_rng = np.random.default_rng(preparation.random_seed)
-    shuffle_rng = np.random.default_rng(preparation.random_seed + 1)
+    effective_shuffle_seed = (
+        preparation.random_seed + 1 if shuffle_seed is None else shuffle_seed
+    )
+    shuffle_rng = np.random.default_rng(effective_shuffle_seed)
     input_mean = np.asarray(preparation.input_mean)
     input_scale = np.asarray(preparation.input_scale)
     target_mean = np.asarray(preparation.target_mean)
@@ -294,7 +306,9 @@ def iter_prepared_batches(
             validation_fraction=preparation.validation_fraction,
         )
         input_values, valid_inputs = _numeric_matrix(chunk, preparation.input_columns)
-        target_values, valid_targets = _numeric_matrix(chunk, preparation.target_columns)
+        target_values, valid_targets = _numeric_matrix(
+            chunk, preparation.target_columns
+        )
         chosen = masks[split] & valid_inputs & valid_targets
         inputs = (input_values[chosen] - input_mean) / input_scale
         targets = (target_values[chosen] - target_mean) / target_scale
@@ -304,4 +318,7 @@ def iter_prepared_batches(
             inputs = inputs[order]
             targets = targets[order]
             for start in range(0, len(inputs), batch_size):
-                yield inputs[start : start + batch_size], targets[start : start + batch_size]
+                yield (
+                    inputs[start : start + batch_size],
+                    targets[start : start + batch_size],
+                )
