@@ -54,7 +54,7 @@ def train_with_vmmin(
             for parameter in parameters:
                 size = parameter.numel()
                 values = torch.as_tensor(
-                    vector[cursor:cursor + size].reshape(tuple(parameter.shape)),
+                    vector[cursor : cursor + size].reshape(tuple(parameter.shape)),
                     dtype=parameter.dtype,
                     device=device,
                 )
@@ -94,8 +94,11 @@ def train_with_vmmin(
                 total.add_(grad.detach())
         flat = np.concatenate(
             [
-                (0.5 * beta * total + alpha * parameter).detach()
-                .cpu().numpy().reshape(-1)
+                (0.5 * beta * total + alpha * parameter)
+                .detach()
+                .cpu()
+                .numpy()
+                .reshape(-1)
                 for total, parameter in zip(accumulated, parameters)
             ]
         )

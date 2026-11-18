@@ -49,7 +49,7 @@ For development:
 6. Optimise candidate architectures using validation loss. Automatic and manual candidate layouts are supported.
 7. Train or continue with Adam mini-batches or legacy vmmin. Validation loss ranks candidate networks; patience-based early stopping applies to Adam, while vmmin follows its own legacy convergence rules.
 8. Evaluate using MAE, RMSE, predictive Q-squared, R-squared, and ANNz+ photo-z metrics for recognised redshift targets.
-9. Generate predictions for another catalogue and export them as CSV.
+9. Generate predictions for another catalogue and export them as CSV. Map each input variable to its 1-sigma error column to export Jacobian-propagated input uncertainty. Committee mode additionally reports committee disagreement and the combined uncertainty.
 10. Save a reusable settings ZIP or a full project ZIP with optional source data.
 
 The test split is held out from architecture and hyperparameter selection. It should be used for final assessment after model choices have been fixed.

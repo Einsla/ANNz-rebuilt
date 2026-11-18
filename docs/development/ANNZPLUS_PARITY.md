@@ -26,12 +26,18 @@ The upstream repository contains one implementation directory per activation fun
 
 - Streamlit app with CSV/TSV input and named columns.
 - Chunked catalogue analysis, row validation, deterministic train/validation/test split assignment, and scaling fitted on training rows only.
-- Fully connected PyTorch regression network with bias terms, configurable hidden-layer widths, seven activation choices and linear outputs.
+- Fully connected PyTorch regression network with bias terms, configurable hidden-layer widths, seven activation choices assignable independently to each hidden layer, and linear outputs.
 - **Adam:** mini-batch training with a user-selected learning rate. Mini-batches are shuffled within source chunks with a deterministic epoch-specific seed.
 - **legacy vmmin:** A Python translation of the original dense variable-metric update, line-search acceptance, reset rules and periodic weight-decay hyperparameter update in Tanh/train.cpp.
-- Validation MSE is monitored during training. Automatic architecture search ranks candidates by validation loss and supports early stopping; the test split is not used for model selection.
+- Validation MSE is monitored during training. The optimiser keeps the user-described layer count and neuron widths fixed, exhaustively tests the selected activation-function combinations independently across hidden layers, and ranks candidates by validation loss. Adam candidates support early stopping; the test split is not used for model selection. The search is capped at 24 candidates.
 - Checkpoints preserve model weights, optimiser state, epoch history and a signature of the architecture/data-preparation settings.
 - Prediction export is chunked and limits inference batch size on the selected device.
+- Committee training creates independently initialised members using the same architecture and fixed data splits; each member retains its best validation-loss checkpoint. Committee predictions are the arithmetic mean of member predictions.
+- Committee inference reproduces `Tanh/test.cpp`: for more than two members it uses the sample-variance correction `M/(M-1) * (mean(y_member^2) - mean(y_member)^2)`; for one or two members the committee scatter term is zero, as in the C++ implementation.
+- Input measurement errors can be mapped to model input columns at prediction time in both single-network and committee modes. For a single network, PyTorch autograd computes its Jacobian and propagates independent input errors in quadrature. For a committee, the implementation converts member Jacobians to original input/output units, averages the Jacobians, and applies the legacy ANNz+ propagation rule. Error columns are never added to the neural-network input layer.
+- Single-network prediction exports the propagated input uncertainty for each target. Committee prediction exports committee disagreement, propagated input uncertainty, and their quadrature total as separate columns.
+- The committee uncertainty path follows the original C++ Tanh/test.cpp implementation. Single-network Jacobian propagation is a mathematically valid extension of the same first-order error-propagation principle; the original C++ committee code is the reference for the ensemble path.
+- Error-column mappings are stored in the model bundle and restored when the model is loaded. Committee checkpoints are embedded in the existing .annzmodel bundle, so a saved committee can be reloaded for prediction without retraining.
 - Evaluation reports MAE, RMSE, split-relative R2 and external predictive Q2. For conventional redshift target names (`z`, `redshift`, `z_spec`, `zspec`, `specz`, `spec_z`), it also reports the three ANNz+ photo-z metrics.
 - Portable project ZIPs preserve architecture, split/scaling settings, optimiser configuration, search results, training history and checkpoints.
 
@@ -41,8 +47,8 @@ The upstream repository contains one implementation directory per activation fun
 2. Python currently does not include the C++ weight-decay term.
 3. Python now ports the legacy vmmin update and line-search procedure. End-to-end parity still depends on matching data normalisation, weight initialisation, objective conventions and floating-point execution.
 4. Python uses named CSV/TSV columns rather than the original whitespace-delimited ANNz+ record format.
-5. Input measurement-error columns are not yet used for uncertainty propagation.
-6. Committee inference, committee scatter, and propagated input-error estimates are not yet implemented.
+5. The Python implementation accepts named input/error-column mappings at prediction time rather than the original fixed-width whitespace record layout. Input errors are assumed independent; correlated measurement errors would require a covariance matrix. The single-network Jacobian path is an extension; the committee path follows the C++ ensemble equations.
+6. Committee inference and uncertainty propagation now follow the original `Tanh/test.cpp` equations. Numerical end-to-end parity against compiled C++ fixtures is still outstanding.
 7. The split is random rather than redshift-stratified or grouped by survey field/object. The appropriate split strategy depends on the intended scientific generalisation test.
 8. No K-fold or leave-one-out cross-validation is currently implemented. The validation split is used for model selection, and the test split is reserved for final assessment.
 9. The Python photo-z `sigma_68` is currently an unweighted empirical percentile calculation. Weighted variants require a corresponding weighting implementation.
@@ -68,7 +74,7 @@ The optimisation objective is mean squared error in the scaled target space. The
 ## Parity work still required
 
 1. Add a documented ANNz+ input adapter for measurement columns and optional target columns.
-2. Implement committee inference and the C++ uncertainty calculation.
+2. Validate committee and uncertainty outputs against controlled fixtures from the compiled C++ implementation.
 3. Implement and validate the legacy weight-decay objective and compare it with the Python objective.
 4. Compare normalization and activation outputs/derivatives against C++ using controlled fixtures.
 5. Run matched train/validation/test catalogues and report prediction and uncertainty differences. A successful import or training run alone does not demonstrate scientific equivalence.
@@ -97,8 +103,8 @@ float64 for the legacy dense variable-metric matrix.
 
 ### Important constraints and parity gaps
 
-- This is a port of the Tanh implementation. The UI restricts vmmin architecture
-  search to tanh hidden activations. Adam retains all supported activations.
+- This is a port of the Tanh implementation. The UI restricts vmmin optimisation
+  candidates to tanh in every hidden layer. Adam retains all supported activations.
 - The inverse-Hessian approximation is dense, requiring O(P**2) CPU memory for
   P network weights. A safety limit prevents excessive matrix allocation.
   Adam is recommended for larger networks.

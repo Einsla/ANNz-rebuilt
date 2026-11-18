@@ -92,7 +92,7 @@ Generated predictions are saved in:
 <Documents>/Galaxy Neural Network Analysis/
 ```
 
-The CSV contains the source row number and one predicted column for each target variable. Rows with missing, non-numeric, or infinite selected inputs are skipped.
+The CSV contains the source row number and one predicted column for each target variable. Rows with missing, non-numeric, or infinite selected inputs are skipped. When measurement-error columns are mapped in the prediction section, single-network mode adds one target_input_error_std column per target using the network Jacobian. Committee mode adds target_committee_std, target_input_error_std, and target_total_std. Error columns must contain finite, non-negative 1-sigma uncertainties in the same physical units as their corresponding inputs. They are not extra neural-network features.
 
 ## Current limitations
 

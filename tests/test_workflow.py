@@ -16,6 +16,7 @@ from annz_rebuilt.data_preparation import (
 from annz_rebuilt.neural_network import (
     build_network,
     evaluate_model,
+    predict_single,
     train_model,
     write_predictions_csv,
 )
@@ -133,7 +134,9 @@ def test_vmmin_training_and_checkpoint_resume(prepared):
         device="cpu",
     )
     assert first["completed_epoch"] >= 1
-    state = torch.load(io.BytesIO(first["checkpoint_bytes"]), map_location="cpu", weights_only=True)
+    state = torch.load(
+        io.BytesIO(first["checkpoint_bytes"]), map_location="cpu", weights_only=True
+    )
     assert state["optimizer_name"] == "vmmin"
     assert state["optimizer_state"] is None
     assert state["vmmin_alpha"] > 0
@@ -171,6 +174,73 @@ def test_prediction_export_skips_invalid_rows(prepared, tmp_path):
     assert saved["source_row"].tolist() == [1, 3]
 
 
+def test_network_supports_a_different_activation_in_each_hidden_layer(prepared):
+    torch = pytest.importorskip("torch")
+    from annz_rebuilt.architecture import architecture_from_selections
+
+    _, _, _ = prepared
+    architecture = architecture_from_selections(
+        ["x1", "x2"],
+        ["z", "mass"],
+        [8, 4, 3],
+        "relu",
+        hidden_activations=["relu", "tanh", "softplus"],
+    )
+    model = build_network(architecture)
+    activation_types = [type(model[index]).__name__ for index in (1, 3, 5)]
+    assert activation_types == ["ReLU", "Tanh", "Softplus"]
+    assert architecture.to_config_dict()["hidden_activations"] == [
+        "relu",
+        "tanh",
+        "softplus",
+    ]
+    x = torch.zeros((2, 2), dtype=torch.float32)
+    assert model(x).shape == (2, 2)
+
+
+def test_architecture_requires_one_activation_per_hidden_layer():
+    with pytest.raises(ValueError, match="exactly one activation"):
+        Architecture(
+            ("x",),
+            ("z",),
+            (8, 4),
+            "relu",
+            hidden_activations=("relu",),
+        )
+
+
+def test_uniform_activation_config_remains_backward_compatible():
+    architecture = Architecture(("x",), ("z",), (4, 3), "tanh")
+    assert architecture.effective_activations == ("tanh", "tanh")
+    assert "hidden_activations" not in architecture.to_config_dict()
+
+
+def test_mixed_activation_checkpoint_can_be_reloaded(prepared):
+    source, preparation, _ = prepared
+    from annz_rebuilt.architecture import architecture_from_selections
+
+    architecture = architecture_from_selections(
+        ["x1", "x2"],
+        ["z", "mass"],
+        [8, 4],
+        "relu",
+        hidden_activations=["relu", "tanh"],
+    )
+    trained = train_model(
+        io.BytesIO(source), architecture, preparation, epochs=2, device="cpu"
+    )
+    report = evaluate_model(
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        trained["checkpoint_bytes"],
+        split="test",
+        device="cpu",
+    )
+    assert len(report) == 2
+    assert architecture.to_config_dict()["hidden_activations"] == ["relu", "tanh"]
+
+
 def test_project_zip_round_trip(prepared):
     source, preparation, architecture = prepared
     blob = create_project_zip(
@@ -178,12 +248,16 @@ def test_project_zip_round_trip(prepared):
         data_preparation_config=preparation.to_config_dict(),
         data_source_name="sample.csv",
         data_source_bytes=source,
-        training_config={"optimizer": "adam"},
+        training_config={
+            "optimizer": "adam",
+            "prediction_error_columns": {"x1": "x1_err"},
+        },
     )
     restored = open_project_zip(blob)
     assert restored.architecture == architecture.to_config_dict()
     assert restored.data_source_bytes == source
-    assert restored.training_config == {"optimizer": "adam"}
+    assert restored.training_config["optimizer"] == "adam"
+    assert restored.training_config["prediction_error_columns"] == {"x1": "x1_err"}
     assert (
         DataPreparation.from_config_dict(restored.data_preparation).input_columns
         == preparation.input_columns
@@ -207,18 +281,30 @@ def test_project_zip_rejects_unsafe_member_path():
 def test_switching_between_adam_and_vmmin_keeps_model_weights(prepared):
     source, preparation, architecture = prepared
     adam = train_model(
-        io.BytesIO(source), architecture, preparation,
-        epochs=1, optimizer_name="adam", device="cpu",
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=1,
+        optimizer_name="adam",
+        device="cpu",
     )
     quasi_newton = train_model(
-        io.BytesIO(source), architecture, preparation,
-        epochs=1, optimizer_name="vmmin",
-        checkpoint_bytes=adam["checkpoint_bytes"], device="cpu",
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=1,
+        optimizer_name="vmmin",
+        checkpoint_bytes=adam["checkpoint_bytes"],
+        device="cpu",
     )
     switched_back = train_model(
-        io.BytesIO(source), architecture, preparation,
-        epochs=1, optimizer_name="adam",
-        checkpoint_bytes=quasi_newton["checkpoint_bytes"], device="cpu",
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=1,
+        optimizer_name="adam",
+        checkpoint_bytes=quasi_newton["checkpoint_bytes"],
+        device="cpu",
     )
     assert quasi_newton["checkpoint_bytes"]
     assert switched_back["checkpoint_bytes"]
@@ -268,29 +354,108 @@ def test_portable_model_bundle_round_trip(prepared):
     from annz_rebuilt.model_bundle import create_model_bundle, open_model_bundle
 
     _, preparation, architecture = prepared
-    history = pd.DataFrame([
-        {"epoch": 1, "training_loss": 0.12, "validation_loss": 0.15},
-        {"epoch": 2, "training_loss": 0.08, "validation_loss": 0.11},
-    ])
+    history = pd.DataFrame(
+        [
+            {"epoch": 1, "training_loss": 0.12, "validation_loss": 0.15},
+            {"epoch": 2, "training_loss": 0.08, "validation_loss": 0.11},
+        ]
+    )
     results = pd.DataFrame([{"architecture": 8, "validation_loss": 0.11}])
+    metrics = pd.DataFrame(
+        [{"target": "z", "MAE": 0.1, "RMSE": 0.2, "R2": 0.9, "Q2": 0.88}]
+    )
     artifact = create_model_bundle(
         architecture.to_config_dict(),
         preparation.to_config_dict(),
         b"synthetic-checkpoint-bytes",
-        training_config={"optimizer": "adam", "learning_rate": 0.001},
+        training_config={
+            "optimizer": "adam",
+            "learning_rate": 0.001,
+            "prediction_error_columns": {"x1": "x1_err"},
+            "chunk_rows": preparation.rows_per_batch,
+            "training_batch_size": preparation.batch_size,
+        },
         training_history=history,
         optimisation_results=results,
+        evaluation_report=metrics,
         source_data_sha256="abc123",
+        bundle_metadata={"uncertainty_method": "legacy Jacobian propagation"},
     )
     restored = open_model_bundle(artifact)
     assert restored.architecture == architecture.to_config_dict()
     from annz_rebuilt.data_preparation import DataPreparation
+
     assert DataPreparation.from_config_dict(restored.data_preparation) == preparation
     assert restored.checkpoint_bytes == b"synthetic-checkpoint-bytes"
     assert restored.training_config["optimizer"] == "adam"
+    assert restored.training_config["prediction_error_columns"] == {"x1": "x1_err"}
+    assert restored.training_config["chunk_rows"] == preparation.rows_per_batch
+    assert (
+        restored.bundle_metadata["uncertainty_method"] == "legacy Jacobian propagation"
+    )
     pd.testing.assert_frame_equal(restored.training_history, history)
-    pd.testing.assert_frame_equal(restored.optimisation_results, results, check_dtype=False)
+    pd.testing.assert_frame_equal(
+        restored.optimisation_results, results, check_dtype=False
+    )
+    pd.testing.assert_frame_equal(restored.evaluation_report, metrics)
     assert restored.source_data_sha256 == "abc123"
+
+
+def test_single_network_jacobian_propagates_input_measurement_errors(prepared):
+    source, preparation, architecture = prepared
+    trained = train_model(
+        io.BytesIO(source), architecture, preparation, epochs=2, device="cpu"
+    )
+    frame = pd.read_csv(io.BytesIO(source)).iloc[:6]
+    inputs = frame[list(architecture.input_columns)].to_numpy(dtype=float)
+    errors = np.full_like(inputs, 0.02)
+    result = predict_single(
+        inputs,
+        architecture,
+        preparation,
+        trained["checkpoint_bytes"],
+        input_errors=errors,
+        device="cpu",
+    )
+    assert result["prediction"].shape == (6, architecture.n_outputs)
+    assert result["input_error_std"].shape == result["prediction"].shape
+    assert np.all(np.isfinite(result["input_error_std"]))
+    assert np.all(result["input_error_std"] > 0)
+    no_errors = predict_single(
+        inputs,
+        architecture,
+        preparation,
+        trained["checkpoint_bytes"],
+        device="cpu",
+    )
+    np.testing.assert_array_equal(no_errors["input_error_std"], 0.0)
+
+
+def test_single_network_prediction_export_maps_error_columns(prepared, tmp_path):
+    source, preparation, architecture = prepared
+    trained = train_model(
+        io.BytesIO(source), architecture, preparation, epochs=1, device="cpu"
+    )
+    frame = pd.read_csv(io.BytesIO(source)).iloc[:12].copy()
+    frame["x1_err"] = 0.03
+    frame["x2_err"] = 0.04
+    output = tmp_path / "single_with_errors.csv"
+    result = write_predictions_csv(
+        io.BytesIO(frame.to_csv(index=False).encode()),
+        output,
+        architecture,
+        preparation,
+        trained["checkpoint_bytes"],
+        error_columns={"x1": "x1_err", "x2": "x2_err"},
+        device="cpu",
+    )
+    saved = pd.read_csv(output)
+    assert result["predicted_rows"] == 12
+    assert {"z_input_error_std", "mass_input_error_std"}.issubset(saved.columns)
+    assert np.all(saved["z_input_error_std"] > 0)
+    assert np.all(saved["mass_input_error_std"] > 0)
+    assert "x1_err" not in saved.columns
+    assert "x2_err" not in saved.columns
 
 
 def test_portable_model_bundle_rejects_invalid_archive():
@@ -309,7 +474,8 @@ def test_saved_model_bundle_predicts_without_retraining(prepared, tmp_path):
         io.BytesIO(source), architecture, preparation, epochs=2, device="cpu"
     )
     artifact = create_model_bundle(
-        architecture.to_config_dict(), preparation.to_config_dict(),
+        architecture.to_config_dict(),
+        preparation.to_config_dict(),
         trained["checkpoint_bytes"],
         training_config={"optimizer": "adam", "learning_rate": 0.001},
         training_history=trained["history"],
@@ -320,7 +486,11 @@ def test_saved_model_bundle_predicts_without_retraining(prepared, tmp_path):
     output = tmp_path / "from_saved_model.csv"
     result = write_predictions_csv(
         io.BytesIO(prediction_input.to_csv(index=False).encode("utf-8")),
-        output, architecture, restored_preparation, restored.checkpoint_bytes, device="cpu",
+        output,
+        architecture,
+        restored_preparation,
+        restored.checkpoint_bytes,
+        device="cpu",
     )
     assert result["predicted_rows"] == 2
     assert len(pd.read_csv(output)) == 2
