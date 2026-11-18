@@ -91,8 +91,7 @@ def vmmin(
                 trial_value = float(objective(trial))
                 accepted = (
                     trial_value
-                    <= minimum
-                    + grad_projection * step_length * acceptance_tolerance
+                    <= minimum + grad_projection * step_length * acceptance_tolerance
                 )
                 if accepted:
                     weights = trial
@@ -104,8 +103,7 @@ def vmmin(
 
         enough = (
             current > absolute_objective_tolerance
-            and current
-            < (1.0 - relative_objective_tolerance) * minimum
+            and current < (1.0 - relative_objective_tolerance) * minimum
         )
         if not enough:
             reset = True
@@ -128,9 +126,7 @@ def vmmin(
 
         if curvature > 0.0:
             hessian_gradient = inverse_hessian @ gradient_change
-            scale = 1.0 + float(
-                np.dot(gradient_change, hessian_gradient)
-            ) / curvature
+            scale = 1.0 + float(np.dot(gradient_change, hessian_gradient)) / curvature
             inverse_hessian += (
                 scale * np.outer(displacement, displacement)
                 - np.outer(hessian_gradient, displacement)

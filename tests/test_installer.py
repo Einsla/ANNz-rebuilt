@@ -6,10 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 INSTALLER_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "installation"
-    / "windows"
-    / "install.py"
+    Path(__file__).resolve().parents[1] / "installation" / "windows" / "install.py"
 )
 SPEC = importlib.util.spec_from_file_location("annz_windows_installer", INSTALLER_PATH)
 assert SPEC is not None and SPEC.loader is not None

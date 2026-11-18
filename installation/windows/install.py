@@ -52,8 +52,14 @@ def main() -> int:
         )
         _run(
             [
-                python, "-m", "pip", "install", "--upgrade", "torch",
-                "--index-url", torch_index,
+                python,
+                "-m",
+                "pip",
+                "install",
+                "--upgrade",
+                "torch",
+                "--index-url",
+                torch_index,
             ]
         )
         print("Installing ANNz-rebuilt and its declared runtime dependencies...")

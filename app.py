@@ -7,6 +7,7 @@ import io
 import json
 import sys
 from datetime import datetime
+from itertools import product
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +18,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from annz_rebuilt import architecture_from_selections  # noqa: E402
 from annz_rebuilt.architecture import SUPPORTED_ACTIVATIONS  # noqa: E402
+from annz_rebuilt.committee import (  # noqa: E402
+    evaluate_committee,
+    train_committee,
+    write_committee_predictions_csv,
+)
 from annz_rebuilt.data_analysis import analyze_catalogue_csv  # noqa: E402
 from annz_rebuilt.data_preparation import DataPreparation, fit_data_preparation  # noqa: E402
 from annz_rebuilt.model_bundle import create_model_bundle, open_model_bundle  # noqa: E402
@@ -77,6 +83,12 @@ def restore_project(zip_bytes: bytes) -> None:
         ("epochs", saved_training.get("additional_epochs", 10)),
         ("learning_rate", saved_training.get("learning_rate", 0.001)),
         ("optimizer_name", saved_optimizer),
+        (
+            "training_mode",
+            "Committee of networks"
+            if saved_training.get("committee_enabled", False)
+            else "Single network",
+        ),
         ("compute_device", saved_training.get("device", "auto")),
     ):
         st.session_state[key] = value
@@ -93,6 +105,7 @@ def restore_project(zip_bytes: bytes) -> None:
     layers = config.get("hidden_layers", [10])
     st.session_state["layer_count"] = len(layers)
     st.session_state["activation"] = config.get("activation", "leaky_relu")
+    st.session_state["configured_hidden_activations"] = config.get("hidden_activations")
     for index, size in enumerate(layers):
         st.session_state[f"layer_{index}"] = int(size)
 
@@ -145,7 +158,7 @@ model_upload = st.file_uploader(
     "Load a trained ANNzPlus model (.annzmodel) — no retraining required",
     type=["annzmodel"],
     key="trained_model_upload",
-    help="Restores network weights, architecture, fitted scaling, optimiser settings and loss history. Upload a prediction catalogue below."
+    help="Restores network weights, architecture, fitted scaling, optimiser settings and loss history. Upload a prediction catalogue below.",
 )
 if model_upload is not None:
     model_blob = model_upload.getvalue()
@@ -159,21 +172,46 @@ if model_upload is not None:
             st.session_state["targets"] = config["target_columns"]
             st.session_state["layer_count"] = len(config["hidden_layers"])
             st.session_state["activation"] = config["activation"]
+            st.session_state["configured_hidden_activations"] = config.get(
+                "hidden_activations"
+            )
             for index, width in enumerate(config["hidden_layers"]):
                 st.session_state[f"layer_{index}"] = int(width)
             st.session_state["data_preparation"] = preparation
             st.session_state["trained_checkpoint"] = bundle.checkpoint_bytes
             st.session_state["training_history"] = bundle.training_history
+            st.session_state["evaluation_report"] = bundle.evaluation_report
             st.session_state["training_config"] = bundle.training_config
+            saved_error_mapping = bundle.training_config.get(
+                "prediction_error_columns", {}
+            )
+            for input_name in config["input_columns"]:
+                st.session_state[f"committee_error_column_{input_name}"] = (
+                    saved_error_mapping.get(input_name, "Not provided")
+                )
+            st.session_state["prediction_error_columns"] = saved_error_mapping
+            st.session_state["training_mode"] = (
+                "Committee of networks"
+                if bundle.training_config.get("committee_enabled", False)
+                else "Single network"
+            )
             st.session_state["auto_tuning_results"] = bundle.optimisation_results
-            st.session_state["optimizer_name"] = bundle.training_config.get("optimizer", "adam")
-            st.session_state["learning_rate"] = bundle.training_config.get("learning_rate") or 0.001
+            st.session_state["optimizer_name"] = bundle.training_config.get(
+                "optimizer", "adam"
+            )
+            st.session_state["learning_rate"] = (
+                bundle.training_config.get("learning_rate") or 0.001
+            )
             st.session_state["compute_device"] = "auto"
             st.session_state["model_bundle_loaded"] = True
             st.session_state["loaded_model_bundle_fingerprint"] = model_fingerprint
-            st.session_state["checkpoint_signature"] = _model_signature(config, preparation)
+            st.session_state["checkpoint_signature"] = _model_signature(
+                config, preparation
+            )
             st.session_state["data_preparation_signature"] = None
-            st.success("Trained model restored. Upload a catalogue containing the saved input columns to generate predictions without retraining.")
+            st.success(
+                "Trained model restored. Upload a catalogue containing the saved input columns to generate predictions without retraining."
+            )
         except (ValueError, KeyError, TypeError) as exc:
             st.error(f"Could not load trained model: {exc}")
             st.stop()
@@ -190,13 +228,25 @@ if project_upload is not None:
             st.error(f"Could not open project: {exc}")
             st.stop()
 
-if st.session_state.get("model_bundle_loaded") and st.button("Exit prediction-only mode and configure a new training run"):
-    for key in ("model_bundle_loaded", "loaded_model_bundle_fingerprint", "trained_checkpoint", "training_history", "checkpoint_signature", "data_preparation", "data_preparation_signature"):
+if st.session_state.get("model_bundle_loaded") and st.button(
+    "Exit prediction-only mode and configure a new training run"
+):
+    for key in (
+        "model_bundle_loaded",
+        "loaded_model_bundle_fingerprint",
+        "trained_checkpoint",
+        "training_history",
+        "checkpoint_signature",
+        "data_preparation",
+        "data_preparation_signature",
+    ):
         st.session_state.pop(key, None)
     st.rerun()
 
 uploaded = st.file_uploader(
-    "Upload a prediction catalogue (CSV or TSV with a header row)" if st.session_state.get("model_bundle_loaded") else "Upload a galaxy catalogue (CSV or TSV with a header row)",
+    "Upload a prediction catalogue (CSV or TSV with a header row)"
+    if st.session_state.get("model_bundle_loaded")
+    else "Upload a galaxy catalogue (CSV or TSV with a header row)",
     type=["csv", "tsv"],
     key="data_source_upload",
 )
@@ -218,8 +268,9 @@ data_fingerprint = hashlib.sha256(data_source_bytes).hexdigest()
 if st.session_state.get("data_source_fingerprint") != data_fingerprint:
     st.session_state["data_source_fingerprint"] = data_fingerprint
     st.session_state["catalogue_analysis"] = None
-    if (st.session_state.get("loaded_data_source_sha256") != data_fingerprint
-            and not st.session_state.get("model_bundle_loaded")):
+    if st.session_state.get(
+        "loaded_data_source_sha256"
+    ) != data_fingerprint and not st.session_state.get("model_bundle_loaded"):
         st.session_state["data_preparation"] = None
         st.session_state["data_preparation_signature"] = None
         st.session_state["trained_checkpoint"] = None
@@ -266,9 +317,17 @@ if st.session_state.get("model_bundle_loaded"):
     targets = st.session_state.get("targets", [])
     missing_model_inputs = [name for name in inputs if name not in columns]
     if missing_model_inputs:
-        st.error("Prediction catalogue is missing model inputs: " + ", ".join(missing_model_inputs))
+        st.error(
+            "Prediction catalogue is missing model inputs: "
+            + ", ".join(missing_model_inputs)
+        )
         st.stop()
-    st.info("Loaded model inputs: " + ", ".join(inputs) + " | Predicted target(s): " + ", ".join(targets))
+    st.info(
+        "Loaded model inputs: "
+        + ", ".join(inputs)
+        + " | Predicted target(s): "
+        + ", ".join(targets)
+    )
 else:
     inputs = st.multiselect(
         "Input variables — what information should the model use?",
@@ -296,7 +355,9 @@ rows_per_batch = st.number_input(
     step=1_000,
     key="rows_per_batch",
 )
-if st.button("Analyze data", disabled=st.session_state.get("model_bundle_loaded", False)):
+if st.button(
+    "Analyze data", disabled=st.session_state.get("model_bundle_loaded", False)
+):
     try:
         with st.spinner("Scanning the catalogue in batches..."):
             st.session_state["catalogue_analysis"] = analyze_catalogue_csv(
@@ -384,21 +445,24 @@ current_preparation_signature = (
     int(rows_per_batch),
     int(training_batch_size),
 )
-if (st.session_state.get("data_preparation_signature") not in {
+if st.session_state.get("data_preparation_signature") not in {
     None,
     current_preparation_signature,
-} and not st.session_state.get("model_bundle_loaded")):
+} and not st.session_state.get("model_bundle_loaded"):
     st.session_state["data_preparation"] = None
     st.session_state["trained_checkpoint"] = None
     st.session_state["checkpoint_signature"] = None
     st.session_state["training_history"] = None
     st.session_state.pop("auto_tuning_results", None)
-if (st.session_state.get("data_preparation_signature") != current_preparation_signature
-        and not st.session_state.get("model_bundle_loaded")):
+if st.session_state.get(
+    "data_preparation_signature"
+) != current_preparation_signature and not st.session_state.get("model_bundle_loaded"):
     st.session_state["data_preparation"] = None
     st.session_state["data_preparation_signature"] = current_preparation_signature
 
-if st.button("Prepare data splits", disabled=st.session_state.get("model_bundle_loaded", False)):
+if st.button(
+    "Prepare data splits", disabled=st.session_state.get("model_bundle_loaded", False)
+):
     try:
         with st.spinner("Scanning rows and fitting training-only scaling..."):
             preparation = fit_data_preparation(
@@ -457,13 +521,9 @@ else:
     st.info("Prepare the data splits before training.")
 
 st.subheader("4. Describe the network")
-left, right = st.columns(2)
-with left:
-    layer_count = st.number_input("Hidden layers", 1, 10, 1, step=1, key="layer_count")
-with right:
-    activation = st.selectbox(
-        "Activation function", sorted(SUPPORTED_ACTIVATIONS), key="activation"
-    )
+st.session_state.setdefault("activation", "tanh")
+activation = st.session_state["activation"]  # Internal default for manual training.
+layer_count = st.number_input("Hidden layers", 1, 10, 1, step=1, key="layer_count")
 neurons = [
     int(
         st.number_input(
@@ -479,7 +539,18 @@ neurons = [
 ]
 architecture = None
 try:
-    architecture = architecture_from_selections(inputs, targets, neurons, activation)
+    configured_activations = st.session_state.get("configured_hidden_activations")
+    if configured_activations is not None and len(configured_activations) != len(
+        neurons
+    ):
+        configured_activations = None
+    architecture = architecture_from_selections(
+        inputs,
+        targets,
+        neurons,
+        activation,
+        hidden_activations=configured_activations,
+    )
     st.caption(
         f"Network: {architecture.n_inputs} input(s) → "
         f"{' → '.join(map(str, architecture.hidden_layers))} → "
@@ -501,6 +572,7 @@ if (
         tuned_config["target_columns"],
         tuned_config["hidden_layers"],
         tuned_config["activation"],
+        hidden_activations=tuned_config.get("hidden_activations"),
     )
 
 if architecture is not None and preparation is not None:
@@ -512,25 +584,19 @@ if architecture is not None and preparation is not None:
     )
     st.subheader("5. Optimise the network")
     st.write(
-        "Compare candidate networks using validation loss. Each candidate starts with "
-        "fresh weights; the test split is kept out of model selection."
+        "The architecture you described above is kept fixed. Optimisation tests "
+        "activation-function combinations independently for each hidden layer."
     )
     st.caption(
-        "Choose an optimiser, then compare hidden-layer layouts and activation functions "
-        "using validation loss. Adam updates weights with mini-batches; legacy vmmin uses the full training-set objective and gradient, streamed from disk in chunks."
+        "The number of hidden layers and the neuron count in every layer will not "
+        "change. Candidates use the same data splits; the test split is reserved "
+        "for the final evaluation."
     )
     if preparation.validation_fraction <= 0:
         st.warning(
             "Set a validation share above 0% in section 3 before running optimisation."
         )
     else:
-        search_mode = st.radio(
-            "How should candidate architectures be generated?",
-            ["Automatic", "Manual"],
-            horizontal=True,
-            key="search_mode",
-            help="Automatic generates a compact set of common layer layouts. Manual lets you specify each layout.",
-        )
         search_optimizer = st.selectbox(
             "Optimisation method",
             ["adam", "vmmin"],
@@ -540,18 +606,30 @@ if architecture is not None and preparation is not None:
                 else "Legacy ANNzPlus vmmin (variable-metric quasi-Newton)"
             ),
             key="search_optimizer",
-            help="Uses the variable-metric update, line search, reset rules and weight-decay schedule in the original ANNzPlus Tanh/train.cpp.",
+            help="Adam supports all listed activations. The legacy vmmin implementation requires tanh in every hidden layer.",
         )
-        if search_optimizer == "vmmin":
-            st.session_state["search_activations"] = ["tanh"]
+        st.markdown("**Activation functions to test in each hidden layer**")
+        activation_choices = []
+        for layer_index, default_activation in enumerate(
+            architecture.effective_activations
+        ):
+            if search_optimizer == "vmmin":
+                st.caption(
+                    f"Hidden layer {layer_index + 1}: tanh (required by legacy vmmin)"
+                )
+                selected_activations = ["tanh"]
+            else:
+                selected_activations = st.multiselect(
+                    f"Hidden layer {layer_index + 1} — permitted activations",
+                    sorted(SUPPORTED_ACTIVATIONS),
+                    default=[default_activation],
+                    key=f"search_layer_{layer_index}_activations",
+                    help="Select one or more functions. Every combination across layers will be tested.",
+                )
+            activation_choices.append(selected_activations)
+
         search_col1, search_col2 = st.columns(2)
         with search_col1:
-            search_activations = st.multiselect(
-                "Activation functions to compare",
-                (["tanh"] if search_optimizer == "vmmin" else sorted(SUPPORTED_ACTIVATIONS)),
-                default=(["tanh"] if search_optimizer == "vmmin" else ["leaky_relu", "relu"]),
-                key="search_activations",
-            )
             if search_optimizer == "adam":
                 search_learning_rates = st.multiselect(
                     "Learning rates to compare",
@@ -563,56 +641,8 @@ if architecture is not None and preparation is not None:
             else:
                 search_learning_rates = [1.0]
                 st.caption(
-                    "legacy vmmin determines its step length internally; no Adam-style learning rate is required."
+                    "Legacy vmmin determines its step length internally; no Adam-style learning rate is required."
                 )
-        with search_col2:
-            if search_mode == "Automatic":
-                automatic_layouts = [
-                    (32,),
-                    (64,),
-                    (128,),
-                    (64, 32),
-                    (128, 64),
-                    (128, 128),
-                ]
-                st.write("**Generated hidden-layer layouts**")
-                st.code(
-                    "\n".join(
-                        ",".join(map(str, layout)) for layout in automatic_layouts
-                    )
-                )
-                st.caption(
-                    "These are candidate sizes, not a guarantee of a globally optimal network. "
-                    "You can switch to Manual to define your own layouts."
-                )
-                parsed_layouts = automatic_layouts
-            else:
-                search_architectures_text = st.text_area(
-                    "Hidden-layer layouts (one candidate per line)",
-                    value="64\n128,64\n128,128",
-                    key="search_architectures_text",
-                    help="64 means one 64-neuron layer; 128,64 means two layers.",
-                )
-                parsed_layouts = []
-                layout_errors = []
-                for line_number, line in enumerate(
-                    search_architectures_text.splitlines(), start=1
-                ):
-                    if not line.strip():
-                        continue
-                    try:
-                        layout = tuple(int(part.strip()) for part in line.split(","))
-                        if not layout or any(
-                            size < 1 or size > 4096 for size in layout
-                        ):
-                            raise ValueError
-                        parsed_layouts.append(layout)
-                    except ValueError:
-                        layout_errors.append(
-                            f"Line {line_number}: use comma-separated integers from 1 to 4096."
-                        )
-                for message in layout_errors:
-                    st.error(message)
             search_epochs = st.number_input(
                 "Maximum epochs per candidate"
                 if search_optimizer == "adam"
@@ -623,6 +653,7 @@ if architecture is not None and preparation is not None:
                 step=5,
                 key="search_epochs",
             )
+        with search_col2:
             if search_optimizer == "adam":
                 search_patience = st.number_input(
                     "Early-stopping patience",
@@ -635,61 +666,57 @@ if architecture is not None and preparation is not None:
                 )
             else:
                 search_patience = None
-                st.caption("Legacy vmmin uses its original objective and convergence rules; validation patience is not applied.")
+                st.caption(
+                    "Legacy vmmin uses its original objective and convergence rules; validation patience is not applied."
+                )
+            st.write("**Fixed network architecture**")
+            st.code(
+                " → ".join(
+                    map(
+                        str,
+                        [
+                            architecture.n_inputs,
+                            *architecture.hidden_layers,
+                            architecture.n_outputs,
+                        ],
+                    )
+                )
+            )
         if search_optimizer == "vmmin":
             st.warning(
-                "Legacy vmmin uses a dense inverse-Hessian matrix in CPU memory (quadratic in the number of network weights). Very large networks may exceed its safety limit; use a smaller network or Adam."
+                "Legacy vmmin requires tanh in every hidden layer and stores a dense inverse-Hessian matrix in CPU memory. Large networks may exceed its safety limit."
             )
-        if search_mode == "Automatic":
-            layout_errors = []
-        parsed_layouts = list(dict.fromkeys(parsed_layouts))
-        if search_optimizer == "vmmin":
-            def vmmin_parameter_count(layout):
-                widths = [len(inputs), *layout, len(targets)]
-                return sum((left + 1) * right for left, right in zip(widths[:-1], widths[1:]))
-            rejected_layouts = [
-                layout for layout in parsed_layouts
-                if vmmin_parameter_count(layout) > 5000
-            ]
-            parsed_layouts = [
-                layout for layout in parsed_layouts
-                if vmmin_parameter_count(layout) <= 5000
-            ]
-            if rejected_layouts:
-                st.warning(
-                    "Skipped vmmin layouts exceeding 5,000 weights (dense inverse-Hessian memory limit): "
-                    + ", ".join(str(list(layout)) for layout in rejected_layouts)
-                )
-        search_step_label = "epoch" if search_optimizer == "adam" else "iteration"
-        candidate_count = (
-            len(parsed_layouts) * len(search_activations) * len(search_learning_rates)
+
+        valid_activation_choices = all(activation_choices) and all(
+            choices for choices in activation_choices
         )
+        activation_combinations = (
+            list(product(*activation_choices)) if valid_activation_choices else []
+        )
+        candidate_count = len(activation_combinations) * len(search_learning_rates)
         st.caption(
-            f"Planned {search_optimizer.upper()} search: {len(parsed_layouts)} layouts × "
-            f"{len(search_activations)} activations × "
-            f"{len(search_learning_rates)} optimiser settings = {candidate_count} candidates."
+            f"Planned search: {len(activation_combinations)} activation combinations × "
+            f"{len(search_learning_rates)} learning-rate settings = {candidate_count} candidates. "
+            f"Architecture fixed at {list(architecture.hidden_layers)}."
         )
         if candidate_count > 24:
             st.warning(
-                "Please reduce the search to 24 candidates or fewer to keep the run manageable."
+                "Please reduce the activation selections or learning rates to 24 candidates or fewer."
             )
         if st.button(
             "Run optimisation",
             type="primary",
             disabled=(
-                not parsed_layouts
-                or not search_activations
+                not valid_activation_choices
                 or not search_learning_rates
-                or bool(layout_errors)
                 or candidate_count > 24
                 or preparation.validation_fraction <= 0
                 or st.session_state.get("model_bundle_loaded", False)
             ),
         ):
             candidates = [
-                (layout, activation_name, float(rate))
-                for layout in parsed_layouts
-                for activation_name in search_activations
+                (activation_combo, float(rate))
+                for activation_combo in activation_combinations
                 for rate in search_learning_rates
             ]
             search_progress = st.progress(0.0)
@@ -698,15 +725,18 @@ if architecture is not None and preparation is not None:
             best_result = None
             best_score = float("inf")
             try:
-                for candidate_index, (layout, activation_name, rate) in enumerate(
-                    candidates
-                ):
+                for candidate_index, (activation_combo, rate) in enumerate(candidates):
                     candidate_architecture = architecture_from_selections(
-                        inputs, targets, layout, activation_name
+                        inputs,
+                        targets,
+                        architecture.hidden_layers,
+                        activation,
+                        hidden_activations=activation_combo,
                     )
+                    activation_label = " / ".join(activation_combo)
                     search_status.write(
                         f"Candidate {candidate_index + 1}/{len(candidates)}: "
-                        f"{activation_name}, layers {list(layout)}, "
+                        f"layer activations [{activation_label}], "
                         + (
                             f"learning rate {rate:g}"
                             if search_optimizer == "adam"
@@ -717,17 +747,19 @@ if architecture is not None and preparation is not None:
                     def candidate_progress(
                         event,
                         candidate_index=candidate_index,
-                        step_label=search_step_label,
+                        step_label=(
+                            "epoch" if search_optimizer == "adam" else "iteration"
+                        ),
                     ):
                         if event["validation_loss"] is None:
                             message = (
-                                f"Candidate {candidate_index + 1}/{len(candidates)} · "
+                                f"Candidate {candidate_index + 1}/{len(candidates)} — "
                                 f"{step_label} {event['epoch']}"
                             )
                         else:
                             message = (
-                                f"Candidate {candidate_index + 1}/{len(candidates)} · "
-                                f"epoch {event['epoch']} · validation loss "
+                                f"Candidate {candidate_index + 1}/{len(candidates)} — "
+                                f"{step_label} {event['epoch']} — validation loss "
                                 f"{event['validation_loss']:.6g}"
                             )
                         search_status.write(message)
@@ -741,24 +773,28 @@ if architecture is not None and preparation is not None:
                         optimizer_name=search_optimizer,
                         separator=separator,
                         device=device_choice,
-                        early_stopping_patience=(int(search_patience) if search_optimizer == "adam" else None),
+                        early_stopping_patience=(
+                            int(search_patience) if search_optimizer == "adam" else None
+                        ),
                         on_epoch=candidate_progress,
                     )
                     score = candidate_result["best_validation_loss"]
-                    candidate_rows.append(
+                    candidate_row = {
+                        "hidden_layers": str(list(architecture.hidden_layers)),
+                        "learning_rate": rate if search_optimizer == "adam" else None,
+                        "optimizer": search_optimizer,
+                        "best_step": candidate_result["best_epoch"],
+                        "steps_run": candidate_result["completed_epoch"],
+                        "validation_loss": score,
+                        "stopped_early": candidate_result["stopped_early"],
+                    }
+                    candidate_row.update(
                         {
-                            "activation": activation_name,
-                            "hidden_layers": str(list(layout)),
-                            "learning_rate": rate
-                            if search_optimizer == "adam"
-                            else None,
-                            "optimizer": search_optimizer,
-                            "best_step": candidate_result["best_epoch"],
-                            "steps_run": candidate_result["completed_epoch"],
-                            "validation_loss": score,
-                            "stopped_early": candidate_result["stopped_early"],
+                            f"layer_{index + 1}_activation": name
+                            for index, name in enumerate(activation_combo)
                         }
                     )
+                    candidate_rows.append(candidate_row)
                     if score is not None and score < best_score:
                         best_score = score
                         best_result = {
@@ -768,6 +804,7 @@ if architecture is not None and preparation is not None:
                             "optimizer": search_optimizer,
                         }
                     search_progress.progress((candidate_index + 1) / len(candidates))
+
                 if best_result is None:
                     raise ValueError(
                         "No candidate produced a validation score. Check the validation split."
@@ -779,17 +816,18 @@ if architecture is not None and preparation is not None:
                 )
                 optimisation_config = {
                     "completed": True,
-                    "mode": search_mode,
-                    "activations": list(search_activations),
+                    "mode": "per_layer_activation_grid",
+                    "activation_candidates_by_layer": [
+                        list(choices) for choices in activation_choices
+                    ],
                     "learning_rates": [float(value) for value in search_learning_rates]
                     if search_optimizer == "adam"
                     else [],
-                    "candidate_layouts": [list(layout) for layout in parsed_layouts],
-                    "manual_layouts_text": (
-                        search_architectures_text if search_mode == "Manual" else ""
-                    ),
+                    "fixed_hidden_layers": list(architecture.hidden_layers),
                     "max_epochs": int(search_epochs),
-                    "patience": int(search_patience) if search_patience is not None else None,
+                    "patience": int(search_patience)
+                    if search_patience is not None
+                    else None,
                     "optimizer": search_optimizer,
                     "selection_metric": "validation_mean_squared_error",
                     "best_validation_loss": float(best_score),
@@ -798,10 +836,15 @@ if architecture is not None and preparation is not None:
                     if search_optimizer == "adam"
                     else None,
                     "best_hidden_layers": list(best_architecture.hidden_layers),
-                    "best_activation": best_architecture.activation,
+                    "best_hidden_activations": list(
+                        best_architecture.effective_activations
+                    ),
                 }
                 st.session_state["auto_tuned_architecture"] = (
                     best_architecture.to_config_dict()
+                )
+                st.session_state["configured_hidden_activations"] = list(
+                    best_architecture.effective_activations
                 )
                 st.session_state["trained_checkpoint"] = best_training[
                     "checkpoint_bytes"
@@ -828,7 +871,7 @@ if architecture is not None and preparation is not None:
                 architecture = best_architecture
                 st.success(
                     f"Optimisation complete. Best validation loss: {best_score:.6g}; "
-                    f"best epoch: {best_training['best_epoch']}."
+                    f"best layer activations: {list(best_architecture.effective_activations)}."
                 )
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(f"Automatic optimisation did not finish: {exc}")
@@ -867,12 +910,47 @@ if architecture is not None and preparation is not None:
     st.session_state["checkpoint_signature"] = model_signature
 
     st.subheader("6. Train the network")
+    training_mode = st.radio(
+        "Training mode",
+        ["Single network", "Committee of networks"],
+        horizontal=True,
+        key="training_mode",
+    )
+    committee_size = 1
+    if (
+        st.session_state.get("trained_checkpoint")
+        and not st.session_state.get("model_bundle_loaded", False)
+        and bool(
+            st.session_state.get("training_config", {}).get("committee_enabled", False)
+        )
+        != (training_mode == "Committee of networks")
+    ):
+        st.session_state["trained_checkpoint"] = None
+        st.session_state["training_history"] = None
+        st.session_state["evaluation_report"] = None
+        st.session_state["training_config"] = {}
+    if training_mode == "Committee of networks":
+        committee_size = int(
+            st.number_input(
+                "Number of independent networks",
+                min_value=1,
+                max_value=20,
+                value=5,
+                step=1,
+                help="Five is a practical starting point. Fewer than three members do not produce the original ANNzPlus committee variance estimate.",
+            )
+        )
+        st.caption(
+            "All members share the selected architecture and data splits, but use independent initial weights. Their predictions are averaged."
+        )
     optimizer_choice = st.selectbox(
         "Optimisation method",
         ["adam", "vmmin"],
         index=0 if st.session_state.get("optimizer_name", "adam") == "adam" else 1,
         format_func=lambda value: (
-            "Adam" if value == "adam" else "Legacy ANNzPlus vmmin (variable-metric quasi-Newton)"
+            "Adam"
+            if value == "adam"
+            else "Legacy ANNzPlus vmmin (variable-metric quasi-Newton)"
         ),
         key="optimizer_name",
         help="Faithful Python translation of the original ANNzPlus Tanh/train.cpp variable-metric routine; it uses a dense inverse-Hessian approximation.",
@@ -908,17 +986,27 @@ if architecture is not None and preparation is not None:
         st.warning(
             "Legacy vmmin stores a dense inverse-Hessian approximation in CPU memory. Large networks may exceed its safety limit; use a smaller network or Adam."
         )
-        if architecture.activation != "tanh":
-            st.error("The original Tanh/train.cpp vmmin implementation requires tanh hidden-layer activations. Change the activation in section 4.")
+        if any(name != "tanh" for name in architecture.effective_activations):
+            st.error(
+                "The legacy vmmin optimiser requires tanh in every hidden layer. Choose tanh for every layer in the optimisation section, or use Adam."
+            )
     st.caption(
         "Adam updates weights after each mini-batch. Legacy vmmin evaluates the full training objective and gradient by streaming chunks; its dense inverse-Hessian matrix uses O(weights?) CPU memory. "
         "When continuing with the same optimiser, its saved state is restored; switching optimisers "
         "keeps the network weights but starts fresh optimiser state."
     )
     if st.button(
-        "Start / continue training",
+        "Train committee"
+        if training_mode == "Committee of networks"
+        else "Start / continue training",
         type="primary",
-        disabled=(st.session_state.get("model_bundle_loaded", False) or (optimizer_choice == "vmmin" and architecture.activation != "tanh")),
+        disabled=(
+            st.session_state.get("model_bundle_loaded", False)
+            or (
+                optimizer_choice == "vmmin"
+                and any(name != "tanh" for name in architecture.effective_activations)
+            )
+        ),
     ):
         progress = st.progress(0)
         status = st.empty()
@@ -929,28 +1017,61 @@ if architecture is not None and preparation is not None:
 
         def update_progress(event):
             progress_state["steps_this_run"] += 1
-            st.session_state["trained_checkpoint"] = event["checkpoint_bytes"]
+            if "member" not in event:
+                st.session_state["trained_checkpoint"] = event["checkpoint_bytes"]
             st.session_state["last_epoch"] = event["epoch"]
+            member_label = (
+                f"Member {event['member']}/{event['committee_size']} ? "
+                if "member" in event
+                else ""
+            )
             status.write(
-                f"{'Epoch' if optimizer_choice == 'adam' else 'legacy vmmin iteration'} {event['epoch']}: {'training loss' if optimizer_choice == 'adam' else 'training objective'} {event['training_loss']:.6g}; "
+                f"{member_label}{'Epoch' if optimizer_choice == 'adam' else 'legacy vmmin iteration'} {event['epoch']}: {'training loss' if optimizer_choice == 'adam' else 'training objective'} {event['training_loss']:.6g}; "
                 f"validation loss {event['validation_loss'] if event['validation_loss'] is not None else 'not available'} "
                 f"({event['device']})"
             )
-            progress.progress(progress_state["steps_this_run"] / int(epochs))
+            progress.progress(
+                min(
+                    progress_state["steps_this_run"]
+                    / (
+                        int(epochs)
+                        * (
+                            committee_size
+                            if training_mode == "Committee of networks"
+                            else 1
+                        )
+                    ),
+                    1.0,
+                )
+            )
 
         try:
-            result = train_model(
-                io.BytesIO(data_source_bytes),
-                architecture,
-                preparation,
-                epochs=int(epochs),
-                learning_rate=float(learning_rate),
-                optimizer_name=optimizer_choice,
-                checkpoint_bytes=st.session_state.get("trained_checkpoint"),
-                separator=separator,
-                device=device_choice,
-                on_epoch=update_progress,
-            )
+            if training_mode == "Committee of networks":
+                result = train_committee(
+                    io.BytesIO(data_source_bytes),
+                    architecture,
+                    preparation,
+                    committee_size=committee_size,
+                    epochs=int(epochs),
+                    learning_rate=float(learning_rate),
+                    optimizer_name=optimizer_choice,
+                    separator=separator,
+                    device=device_choice,
+                    on_epoch=update_progress,
+                )
+            else:
+                result = train_model(
+                    io.BytesIO(data_source_bytes),
+                    architecture,
+                    preparation,
+                    epochs=int(epochs),
+                    learning_rate=float(learning_rate),
+                    optimizer_name=optimizer_choice,
+                    checkpoint_bytes=st.session_state.get("trained_checkpoint"),
+                    separator=separator,
+                    device=device_choice,
+                    on_epoch=update_progress,
+                )
             st.session_state["trained_checkpoint"] = result["checkpoint_bytes"]
             st.session_state["checkpoint_signature"] = model_signature
             st.session_state["training_history"] = result["history"]
@@ -962,6 +1083,15 @@ if architecture is not None and preparation is not None:
                 else None,
                 "device": device_choice,
                 "additional_epochs": int(epochs),
+                "committee_size": committee_size
+                if training_mode == "Committee of networks"
+                else 1,
+                "committee_enabled": training_mode == "Committee of networks",
+                "committee_members": result.get("members", pd.DataFrame()).to_dict(
+                    "records"
+                )
+                if training_mode == "Committee of networks"
+                else None,
             }
             st.session_state["last_epoch"] = result["completed_epoch"]
             st.session_state["evaluation_report"] = None
@@ -978,7 +1108,7 @@ if architecture is not None and preparation is not None:
         st.markdown("**Training history**")
         st.dataframe(history, hide_index=True, use_container_width=True)
         st.caption(
-            "The horizontal axis is an epoch for Adam or an optimisation iteration for legacy vmmin."
+            "The horizontal axis is an epoch for Adam or an optimisation iteration for legacy vmmin. Committee histories contain a separate series of records for each independently trained member."
         )
         st.line_chart(history.set_index("epoch")[["training_loss", "validation_loss"]])
 
@@ -991,18 +1121,38 @@ if architecture is not None and preparation is not None:
             key="evaluation_split",
         )
         if st.session_state.get("model_bundle_loaded"):
-            st.info("This is a prediction-only model load. The original training catalogue is not required; upload a catalogue with the saved input columns in the prediction section. Training-split evaluation is disabled because this catalogue may differ from the training data.")
-        if st.button("Evaluate model", disabled=st.session_state.get("model_bundle_loaded", False)):
+            st.info(
+                "This is a prediction-only model load. The original training catalogue is not required; upload a catalogue with the saved input columns in the prediction section. Training-split evaluation is disabled because this catalogue may differ from the training data."
+            )
+        if st.button(
+            "Evaluate model",
+            disabled=st.session_state.get("model_bundle_loaded", False),
+        ):
             try:
-                report = evaluate_model(
-                    io.BytesIO(data_source_bytes),
-                    architecture,
-                    preparation,
-                    checkpoint,
-                    split=split,
-                    separator=separator,
-                    device=device_choice,
-                )
+                if bool(
+                    st.session_state.get("training_config", {}).get(
+                        "committee_enabled", False
+                    )
+                ):
+                    report = evaluate_committee(
+                        io.BytesIO(data_source_bytes),
+                        architecture,
+                        preparation,
+                        checkpoint,
+                        split=split,
+                        separator=separator,
+                        device=device_choice,
+                    )
+                else:
+                    report = evaluate_model(
+                        io.BytesIO(data_source_bytes),
+                        architecture,
+                        preparation,
+                        checkpoint,
+                        split=split,
+                        separator=separator,
+                        device=device_choice,
+                    )
                 st.session_state["evaluation_report"] = report
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(f"Could not evaluate this model: {exc}")
@@ -1022,15 +1172,69 @@ if architecture is not None and preparation is not None:
         if st.session_state.get("model_bundle_loaded"):
             prediction_bytes = data_source_bytes
             prediction_name = data_source_name
-            st.caption("Using the uploaded catalogue as prediction input. No training data or retraining is needed.")
+            st.caption(
+                "Using the uploaded catalogue as prediction input. No training data or retraining is needed."
+            )
         else:
             prediction_upload = st.file_uploader(
                 "Upload a catalogue containing the selected input columns",
                 type=["csv", "tsv"],
                 key="prediction_upload",
             )
-            prediction_bytes = prediction_upload.getvalue() if prediction_upload is not None else None
-            prediction_name = prediction_upload.name if prediction_upload is not None else ""
+            prediction_bytes = (
+                prediction_upload.getvalue() if prediction_upload is not None else None
+            )
+            prediction_name = (
+                prediction_upload.name if prediction_upload is not None else ""
+            )
+        is_committee = bool(
+            st.session_state.get("training_config", {}).get("committee_enabled", False)
+        )
+        error_mapping = {}
+        if prediction_bytes is not None:
+            st.markdown("**Input measurement-error column mapping**")
+            st.caption(
+                "For each model input, select the catalogue column containing its 1-sigma "
+                "measurement uncertainty. Select 'Not provided' when no error column is "
+                "available. Errors must use the same physical units as their inputs. "
+                "They are used only for prediction uncertainty propagation: they are not "
+                "additional neural-network inputs and are not used during training."
+            )
+            if is_committee:
+                st.caption(
+                    "Committee predictions report committee disagreement, propagated "
+                    "input uncertainty, and their quadrature total separately."
+                )
+            else:
+                st.caption(
+                    "Single-network predictions report Jacobian-propagated input "
+                    "measurement uncertainty for each target."
+                )
+            error_column_options = [
+                name for name in columns if name not in architecture.input_columns
+            ]
+            with st.expander("Map uncertainty columns to model inputs", expanded=True):
+                for input_name in architecture.input_columns:
+                    options = ["Not provided", *error_column_options]
+                    saved_selection = st.session_state.get(
+                        f"committee_error_column_{input_name}", "Not provided"
+                    )
+                    selected_error = st.selectbox(
+                        f"Measurement error for {input_name}",
+                        options,
+                        index=options.index(saved_selection)
+                        if saved_selection in options
+                        else 0,
+                        key=f"committee_error_column_{input_name}",
+                        help=f"Choose the 1-sigma uncertainty column corresponding to {input_name}.",
+                    )
+                    if selected_error != "Not provided":
+                        error_mapping[input_name] = selected_error
+            st.session_state["prediction_error_columns"] = error_mapping
+            if not error_mapping:
+                st.info(
+                    "No measurement-error columns selected. Prediction CSV will contain predictions without input-error uncertainty columns."
+                )
         if prediction_bytes is not None and st.button("Write prediction file"):
             prediction_separator = (
                 "\t" if prediction_name.lower().endswith(".tsv") else ","
@@ -1040,41 +1244,95 @@ if architecture is not None and preparation is not None:
                 f"predictions_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.csv"
             )
             try:
-                result = write_predictions_csv(
-                    io.BytesIO(prediction_bytes),
-                    output_file,
-                    architecture,
-                    preparation,
-                    checkpoint,
-                    separator=prediction_separator,
-                    device=device_choice,
-                )
+                if is_committee:
+                    result = write_committee_predictions_csv(
+                        io.BytesIO(prediction_bytes),
+                        output_file,
+                        architecture,
+                        preparation,
+                        checkpoint,
+                        error_columns=error_mapping,
+                        separator=prediction_separator,
+                        device=device_choice,
+                    )
+                else:
+                    result = write_predictions_csv(
+                        io.BytesIO(prediction_bytes),
+                        output_file,
+                        architecture,
+                        preparation,
+                        checkpoint,
+                        error_columns=error_mapping,
+                        separator=prediction_separator,
+                        device=device_choice,
+                    )
                 st.success(
                     f"Saved {result['predicted_rows']:,} predictions to {result['path']}. "
-                    f"Skipped {result['skipped_rows']:,} rows with invalid inputs."
+                    f"Skipped {result['skipped_rows']:,} rows with invalid inputs/errors."
                 )
             except (ValueError, RuntimeError, OSError) as exc:
                 st.error(f"Could not generate predictions: {exc}")
 
 st.subheader("9. Save the trained model and project")
-if st.session_state.get("trained_checkpoint") and preparation is not None and architecture is not None:
+if (
+    st.session_state.get("trained_checkpoint")
+    and preparation is not None
+    and architecture is not None
+):
+    model_training_config = {
+        **st.session_state.get("training_config", {}),
+        "optimizer": st.session_state.get("optimizer_name")
+        or st.session_state.get("training_config", {}).get("optimizer", "adam"),
+        "prediction_error_columns": st.session_state.get(
+            "prediction_error_columns",
+            st.session_state.get("training_config", {}).get(
+                "prediction_error_columns", {}
+            ),
+        ),
+        "chunk_rows": preparation.rows_per_batch,
+        "training_batch_size": preparation.batch_size,
+        "random_seed": preparation.random_seed,
+        "train_fraction": preparation.train_fraction,
+        "validation_fraction": preparation.validation_fraction,
+        "test_fraction": preparation.test_fraction,
+    }
     model_artifact = create_model_bundle(
         architecture.to_config_dict(),
         preparation.to_config_dict(),
         st.session_state["trained_checkpoint"],
-        training_config=st.session_state.get("training_config", {}),
+        training_config=model_training_config,
         training_history=st.session_state.get("training_history"),
         optimisation_results=st.session_state.get("auto_tuning_results"),
+        evaluation_report=st.session_state.get("evaluation_report"),
         source_data_sha256=st.session_state.get("data_source_fingerprint"),
+        bundle_metadata={
+            "uncertainty_method": (
+                "ANNzPlus legacy committee Jacobian and scatter propagation"
+                if model_training_config.get("committee_enabled")
+                else "Single-network Jacobian input-error propagation"
+            ),
+            "input_error_assumption": (
+                "Independent input errors; network Jacobian propagated in "
+                "original physical units"
+            ),
+            "committee_variance_rule": (
+                "M/(M-1) corrected member variance for M > 2; zero for M <= 2"
+            ),
+            "q2_definition": (
+                "Predictive Q2 = 1 - PRESS / sum((observed - training-set mean)^2)"
+            ),
+        },
     )
     st.download_button(
         "Download trained model (.annzmodel)",
         model_artifact,
         file_name="annzplus_trained_model.annzmodel",
         mime="application/zip",
-        help="Standalone model: architecture, learned weights, fitted scaling, best settings, optimiser state and loss history. Does not include the training catalogue.",
+        help="Standalone model: architecture and per-layer activations, weights/committee members, fitted scaling, split/chunk/batch settings, optimiser and optimisation results, error-column mappings, uncertainty metadata and loss history. Does not include the training catalogue.",
     )
-    st.caption("Load this .annzmodel file in a future session and upload a new catalogue with the same input columns. Predictions use the saved weights and scaling; no retraining or original training catalogue is required.")
+    st.caption(
+        "Load this .annzmodel file in a future session and upload a new catalogue with the saved input columns. Architecture, weights, preprocessing, optimisation settings, committee members and measurement-error mappings are restored; no retraining or original training catalogue is required."
+    )
 include_data = st.checkbox(
     "Include the original data source in the project ZIP", value=True
 )
@@ -1104,6 +1362,9 @@ if st.button("Prepare project ZIP"):
                 else None,
                 "device": st.session_state.get("compute_device", "auto"),
                 "additional_epochs": int(st.session_state.get("epochs", 10)),
+                "prediction_error_columns": st.session_state.get(
+                    "prediction_error_columns", {}
+                ),
             },
             optimisation_results=st.session_state.get("auto_tuning_results"),
         )
@@ -1124,6 +1385,9 @@ if st.button("Prepare project ZIP"):
                 else None,
                 "device": st.session_state.get("compute_device", "auto"),
                 "additional_epochs": int(st.session_state.get("epochs", 10)),
+                "prediction_error_columns": st.session_state.get(
+                    "prediction_error_columns", {}
+                ),
             },
             optimisation_results=st.session_state.get("auto_tuning_results"),
         )

@@ -45,14 +45,14 @@ def build_network(architecture: Architecture):
         "softplus": nn.Softplus,
         "silu": nn.SiLU,
     }
-    if architecture.activation not in activations:
-        raise ValueError(f"Unsupported activation: {architecture.activation}")
     layers = []
     width = architecture.n_inputs
-    for next_width in architecture.hidden_layers:
-        layers.extend(
-            (nn.Linear(width, next_width), activations[architecture.activation]())
-        )
+    for next_width, activation_name in zip(
+        architecture.hidden_layers, architecture.effective_activations
+    ):
+        if activation_name not in activations:
+            raise ValueError(f"Unsupported activation: {activation_name}")
+        layers.extend((nn.Linear(width, next_width), activations[activation_name]()))
         width = next_width
     layers.append(nn.Linear(width, architecture.n_outputs))
     return nn.Sequential(*layers)
@@ -92,14 +92,14 @@ def _pack_checkpoint(
 ) -> bytes:
     buffer = io.BytesIO()
     state = {
-            "format_version": 1,
-            "epoch": epoch,
-            "signature": signature,
-            "model_state": model.state_dict(),
-            "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
-            "optimizer_name": optimizer_name,
-            "history": history,
-        }
+        "format_version": 1,
+        "epoch": epoch,
+        "signature": signature,
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict() if optimizer is not None else None,
+        "optimizer_name": optimizer_name,
+        "history": history,
+    }
     if extra_state:
         state.update(extra_state)
     torch.save(state, buffer)
@@ -147,6 +147,7 @@ def train_model(
     separator: str = ",",
     device: str = "auto",
     early_stopping_patience: int | None = None,
+    initialization_seed: int | None = None,
     on_epoch: Callable[[dict], None] | None = None,
 ) -> dict:
     """Train with mini-batch Adam or the legacy ANNzPlus vmmin optimiser."""
@@ -173,6 +174,7 @@ def train_model(
             separator=separator,
             device=device,
             early_stopping_patience=early_stopping_patience,
+            initialization_seed=initialization_seed,
             on_epoch=on_epoch,
         )
     if epochs < 1 or not np.isfinite(learning_rate) or learning_rate <= 0:
@@ -185,7 +187,11 @@ def train_model(
         raise ValueError("Early stopping requires a non-empty validation split.")
     torch, nn = _torch()
     target_device = _device(torch, device)
-    torch.manual_seed(preparation.random_seed)
+    torch.manual_seed(
+        preparation.random_seed
+        if initialization_seed is None
+        else int(initialization_seed)
+    )
     model = build_network(architecture).to(target_device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     signature = _signature(architecture, preparation)
@@ -410,6 +416,83 @@ def evaluate_model(
     return pd.DataFrame(result)
 
 
+def predict_single(
+    inputs: np.ndarray,
+    architecture: Architecture,
+    preparation: DataPreparation,
+    checkpoint_bytes: bytes,
+    *,
+    input_errors: np.ndarray | None = None,
+    device: str = "auto",
+) -> dict[str, np.ndarray]:
+    """Predict with one network and propagate independent input errors via its Jacobian."""
+    values = np.asarray(inputs, dtype=np.float64)
+    if values.ndim != 2 or values.shape[1] != architecture.n_inputs:
+        raise ValueError("Input matrix shape does not match the saved architecture.")
+    if len(values) == 0:
+        raise ValueError("At least one prediction input row is required.")
+    if not np.isfinite(values).all():
+        raise ValueError("Prediction inputs must be finite.")
+    has_errors = input_errors is not None
+    if has_errors:
+        errors = np.asarray(input_errors, dtype=np.float64)
+        if errors.shape != values.shape:
+            raise ValueError("Input-error matrix must have the same shape as inputs.")
+        if not np.isfinite(errors).all() or np.any(errors < 0):
+            raise ValueError(
+                "Input measurement errors must be finite and non-negative."
+            )
+    else:
+        errors = np.zeros_like(values)
+
+    torch, _ = _torch()
+    target_device = _device(torch, device)
+    model, _ = _restore_model(
+        checkpoint_bytes, architecture, preparation, torch, target_device
+    )
+    x_mean = np.asarray(preparation.input_mean, dtype=np.float64)
+    x_scale = np.asarray(preparation.input_scale, dtype=np.float64)
+    y_mean = np.asarray(preparation.target_mean, dtype=np.float64)
+    y_scale = np.asarray(preparation.target_scale, dtype=np.float64)
+    predictions, propagated = [], []
+    for start in range(0, len(values), preparation.batch_size):
+        stop = min(start + preparation.batch_size, len(values))
+        normalized = (values[start:stop] - x_mean) / x_scale
+        if has_errors:
+            x = (
+                torch.as_tensor(normalized, dtype=torch.float32, device=target_device)
+                .detach()
+                .requires_grad_(True)
+            )
+            output = model(x)
+            gradients = []
+            for target_index in range(architecture.n_outputs):
+                gradient = torch.autograd.grad(
+                    output[:, target_index].sum(),
+                    x,
+                    retain_graph=target_index < architecture.n_outputs - 1,
+                    create_graph=False,
+                )[0]
+                gradients.append(gradient.detach().cpu().numpy())
+            jacobian = np.stack(gradients, axis=1)
+            jacobian *= y_scale[None, :, None] / x_scale[None, None, :]
+            propagated.append(
+                np.sum(np.square(jacobian * errors[start:stop, None, :]), axis=2)
+            )
+        else:
+            with torch.no_grad():
+                output = model(
+                    torch.as_tensor(
+                        normalized, dtype=torch.float32, device=target_device
+                    )
+                )
+            propagated.append(np.zeros((stop - start, architecture.n_outputs)))
+        predictions.append(output.detach().cpu().numpy().astype(np.float64))
+    prediction = np.concatenate(predictions, axis=0) * y_scale + y_mean
+    input_error_std = np.sqrt(np.concatenate(propagated, axis=0))
+    return {"prediction": prediction, "input_error_std": input_error_std}
+
+
 def write_predictions_csv(
     source: str | Path | BinaryIO,
     output_path: str | Path,
@@ -417,22 +500,25 @@ def write_predictions_csv(
     preparation: DataPreparation,
     checkpoint_bytes: bytes,
     *,
+    error_columns: dict[str, str] | None = None,
     separator: str = ",",
     device: str = "auto",
 ) -> dict[str, int | str]:
-    """Predict a catalogue in chunks and write results directly to a CSV file."""
-    torch, _ = _torch()
-    target_device = _device(torch, device)
-    model, _ = _restore_model(
-        checkpoint_bytes, architecture, preparation, torch, target_device
-    )
+    """Predict a catalogue in chunks and optionally export Jacobian uncertainties."""
     if hasattr(source, "seek"):
         source.seek(0)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     reader = pd.read_csv(source, sep=separator, chunksize=preparation.rows_per_batch)
-    offset = written = 0
+    offset = written = skipped = 0
     header = True
+    error_columns = error_columns or {}
+    unknown_inputs = set(error_columns).difference(architecture.input_columns)
+    if unknown_inputs:
+        raise ValueError(
+            "Error mappings refer to non-input columns: "
+            + ", ".join(sorted(unknown_inputs))
+        )
     try:
         with output.open("w", encoding="utf-8", newline="") as handle:
             for chunk in reader:
@@ -441,51 +527,66 @@ def write_predictions_csv(
                     raise ValueError(
                         "Prediction column names must be unique after removing a leading #."
                     )
-                missing = [
-                    c for c in architecture.input_columns if c not in chunk.columns
-                ]
+                needed = list(architecture.input_columns) + list(error_columns.values())
+                missing = [name for name in needed if name not in chunk.columns]
                 if missing:
-                    raise ValueError("Missing input variables: " + ", ".join(missing))
+                    raise ValueError(
+                        "Missing input/error columns: " + ", ".join(missing)
+                    )
                 values = (
                     chunk.loc[:, list(architecture.input_columns)]
                     .apply(pd.to_numeric, errors="coerce")
                     .to_numpy(dtype="float64", na_value=np.nan)
                 )
+                errors = np.zeros_like(values)
                 valid = np.isfinite(values).all(axis=1)
+                for index, input_name in enumerate(architecture.input_columns):
+                    error_name = error_columns.get(input_name)
+                    if error_name:
+                        column = pd.to_numeric(
+                            chunk[error_name], errors="coerce"
+                        ).to_numpy(dtype=np.float64)
+                        valid &= np.isfinite(column) & (column >= 0)
+                        errors[:, index] = np.where(np.isfinite(column), column, 0.0)
                 source_rows = np.arange(offset + 1, offset + len(chunk) + 1)[valid]
                 offset += len(chunk)
                 if not len(source_rows):
+                    skipped += len(chunk)
                     continue
-                valid_values = values[valid]
-                y = np.empty(
-                    (len(valid_values), architecture.n_outputs), dtype=np.float64
+                result = predict_single(
+                    values[valid],
+                    architecture,
+                    preparation,
+                    checkpoint_bytes,
+                    input_errors=errors[valid] if error_columns else None,
+                    device=device,
                 )
-                input_mean = np.asarray(preparation.input_mean)
-                input_scale = np.asarray(preparation.input_scale)
-                # Prediction must obey the same GPU mini-batch limit as training.
-                for start in range(0, len(valid_values), preparation.batch_size):
-                    end = min(start + preparation.batch_size, len(valid_values))
-                    x_np = (valid_values[start:end] - input_mean) / input_scale
-                    x = torch.as_tensor(x_np, dtype=torch.float32, device=target_device)
-                    with torch.no_grad():
-                        y[start:end] = model(x).cpu().numpy().astype(np.float64)
-                y = y * np.asarray(preparation.target_scale) + np.asarray(
-                    preparation.target_mean
+                frame = pd.DataFrame(
+                    result["prediction"], columns=architecture.target_columns
                 )
-                frame = pd.DataFrame(y, columns=architecture.target_columns)
+                if error_columns:
+                    for target_index, target in enumerate(architecture.target_columns):
+                        frame[f"{target}_input_error_std"] = result["input_error_std"][
+                            :, target_index
+                        ]
                 frame.insert(0, "source_row", source_rows)
                 frame.to_csv(handle, index=False, header=header, lineterminator="\n")
                 header = False
                 written += len(frame)
+                skipped += len(chunk) - len(frame)
     finally:
         reader.close()
     if not written:
-        raise ValueError("The prediction catalogue has no rows with valid inputs.")
+        raise ValueError(
+            "The prediction catalogue has no rows with valid inputs and errors."
+        )
     return {
         "path": str(output.resolve()),
         "predicted_rows": written,
-        "skipped_rows": offset - written,
+        "skipped_rows": skipped,
     }
+
+
 def _train_vmmin(
     source,
     architecture,
@@ -496,6 +597,7 @@ def _train_vmmin(
     separator,
     device,
     early_stopping_patience,
+    initialization_seed,
     on_epoch,
 ):
     """Train using the original ANNzPlus variable-metric algorithm.
@@ -507,7 +609,11 @@ def _train_vmmin(
 
     torch, _ = _torch()
     target_device = _device(torch, device)
-    torch.manual_seed(preparation.random_seed)
+    torch.manual_seed(
+        preparation.random_seed
+        if initialization_seed is None
+        else int(initialization_seed)
+    )
     model = build_network(architecture).to(target_device).double()
     signature = _signature(architecture, preparation)
     history = []
@@ -544,7 +650,13 @@ def _train_vmmin(
     )
     best_iteration = previous_iterations
     best_checkpoint = _pack_checkpoint(
-        torch, model, None, previous_iterations, signature, history, "vmmin",
+        torch,
+        model,
+        None,
+        previous_iterations,
+        signature,
+        history,
+        "vmmin",
         {"vmmin_alpha": initial_alpha, "vmmin_beta": initial_beta},
     )
     latest = best_checkpoint
@@ -562,7 +674,13 @@ def _train_vmmin(
         }
         history.append(record)
         latest = _pack_checkpoint(
-            torch, model, None, iteration, signature, history, "vmmin",
+            torch,
+            model,
+            None,
+            iteration,
+            signature,
+            history,
+            "vmmin",
             {"vmmin_alpha": initial_alpha, "vmmin_beta": initial_beta},
         )
         if validation_loss is not None and validation_loss < best_validation_loss:
@@ -593,7 +711,13 @@ def _train_vmmin(
     )
     completed = previous_iterations + outcome["iterations"]
     latest = _pack_checkpoint(
-        torch, model, None, completed, signature, history, "vmmin",
+        torch,
+        model,
+        None,
+        completed,
+        signature,
+        history,
+        "vmmin",
         {"vmmin_alpha": outcome["alpha"], "vmmin_beta": outcome["beta"]},
     )
     if best_iteration == completed and np.isfinite(best_validation_loss):
@@ -603,7 +727,9 @@ def _train_vmmin(
         "checkpoint_bytes": selected or latest,
         "history": pd.DataFrame(history),
         "completed_epoch": completed,
-        "best_epoch": best_iteration if best_iteration > previous_iterations else completed,
+        "best_epoch": best_iteration
+        if best_iteration > previous_iterations
+        else completed,
         "best_validation_loss": (
             best_validation_loss if np.isfinite(best_validation_loss) else None
         ),

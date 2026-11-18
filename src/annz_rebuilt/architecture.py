@@ -29,13 +29,25 @@ class Architecture:
     target_columns: tuple[str, ...]
     hidden_layers: tuple[int, ...]
     activation: str = "leaky_relu"
+    hidden_activations: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "input_columns", tuple(self.input_columns))
         object.__setattr__(self, "target_columns", tuple(self.target_columns))
         object.__setattr__(self, "hidden_layers", tuple(self.hidden_layers))
         object.__setattr__(self, "activation", self.activation.strip().lower())
+        activations = self.hidden_activations
+        if activations is None:
+            activations = (self.activation,) * len(self.hidden_layers)
+        else:
+            activations = tuple(str(name).strip().lower() for name in activations)
+        object.__setattr__(self, "hidden_activations", activations)
         self.validate()
+
+    @property
+    def effective_activations(self) -> tuple[str, ...]:
+        """Return the activation function assigned to each hidden layer."""
+        return self.hidden_activations or ()
 
     @property
     def n_inputs(self) -> int:
@@ -56,6 +68,17 @@ class Architecture:
             )
         if self.activation not in SUPPORTED_ACTIVATIONS:
             raise ValueError(f"Unsupported activation: {self.activation}")
+        if len(self.effective_activations) != len(self.hidden_layers):
+            raise ValueError(
+                "Provide exactly one activation function per hidden layer."
+            )
+        unsupported = sorted(
+            set(self.effective_activations).difference(SUPPORTED_ACTIVATIONS)
+        )
+        if unsupported:
+            raise ValueError(
+                "Unsupported hidden-layer activations: " + ", ".join(unsupported)
+            )
         selected = (*self.input_columns, *self.target_columns)
         if any(not name.strip() for name in selected):
             raise ValueError("Variable names cannot be blank.")
@@ -103,12 +126,19 @@ class Architecture:
         )
 
     def to_config_dict(self) -> dict[str, Any]:
-        return {
+        config = {
             "input_columns": list(self.input_columns),
             "target_columns": list(self.target_columns),
             "hidden_layers": list(self.hidden_layers),
             "activation": self.activation,
         }
+        # Keep old single-activation configs and checkpoint signatures unchanged.
+        if len(set(self.effective_activations)) > 1 or (
+            self.effective_activations
+            and self.effective_activations[0] != self.activation
+        ):
+            config["hidden_activations"] = list(self.effective_activations)
+        return config
 
     def write_config(self, path: str | Path) -> Path:
         destination = Path(path)
@@ -124,6 +154,7 @@ def architecture_from_selections(
     target_columns: Sequence[str],
     hidden_layers: Sequence[int],
     activation: str = "leaky_relu",
+    hidden_activations: Sequence[str] | None = None,
 ) -> Architecture:
     """Create a validated architecture from UI selections."""
     return Architecture(
@@ -131,4 +162,5 @@ def architecture_from_selections(
         tuple(target_columns),
         tuple(int(size) for size in hidden_layers),
         activation,
+        tuple(hidden_activations) if hidden_activations is not None else None,
     )
