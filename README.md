@@ -4,7 +4,7 @@
 
 This project investigates and rebuilds the legacy [ANNzPlus](https://github.com/imdadmpt/ANNzPlus) photometric-redshift workflow in Python. It provides a local Streamlit interface for catalogue analysis, neural-network architecture design, training, evaluation, prediction, and reusable project archives.
 
-This is a research rebuild, not a claim of bit-for-bit or scientific equivalence with the original C++ implementation. See [the parity assessment](docs/development/ANNZPLUS_PARITY.md) for confirmed differences and remaining work.
+This is a research rebuild, not a claim of bit-for-bit or scientific equivalence with the original C++ implementation. See [the parity assessment](docs/development/ANNZPLUS_PARITY.md) for confirmed differences and remaining work. The current merged milestone is recorded in the [19 November 2026 project checkpoint](docs/checkpoints/2026-11-19-committee-and-input-error-propagation.md).
 
 ## Install on Windows
 
@@ -68,6 +68,7 @@ The vmmin port is not yet end-to-end scientific parity: data normalisation, rand
 - `tests/`: automated regression and workflow tests.
 - `docs/user-guide/`: local usage and project workflow documentation.
 - `docs/development/`: implementation notes and C++ parity assessment.
+- `docs/checkpoints/`: dated implementation checkpoints and resume notes.
 - `docs/research/`: research notes and meeting outcomes.
 - `installation/`: platform installation resources and guides.
 - `pyproject.toml`: package metadata and dependency declarations.

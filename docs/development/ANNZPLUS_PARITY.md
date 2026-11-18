@@ -71,6 +71,12 @@ It uses the training-target mean as its reference. R2 uses the evaluated split's
 
 The optimisation objective is mean squared error in the scaled target space. The reported MAE/RMSE are converted back to the original target units.
 
+## Current integrated checkpoint (19 November 2026)
+
+The committee and input measurement-error propagation work is merged into `main` at commit `7b1634c`. Single-network Jacobian propagation and committee uncertainty are both available in prediction mode, with named input-to-error-column mapping. Mappings are persisted in model bundles and project configuration. The full milestone, verification results and resume instructions are recorded in [the dated checkpoint](../checkpoints/2026-11-19-committee-and-input-error-propagation.md).
+
+The automated suite currently passes 27 tests, with Ruff lint/format checks and Python compilation also passing. This confirms software regression coverage, not numerical scientific parity with C++.
+
 ## Parity work still required
 
 1. Add a documented ANNz+ input adapter for measurement columns and optional target columns.
