@@ -38,6 +38,8 @@ def vmmin(
     if n_weights == 0:
         raise ValueError("vmmin requires at least one trainable weight.")
 
+    # np.zeros allocates the dense inverse-Hessian matrix used by the legacy quasi-Newton optimiser.
+    # Its memory requirement grows with the square of the number of trainable weights.
     inverse_hessian = np.zeros((n_weights, n_weights), dtype=np.float64)
     current = float(objective(weights))
     minimum = current
@@ -70,6 +72,7 @@ def vmmin(
 
         # t = -Gg; use symmetric inverse-Hessian approximation.
         direction = -(inverse_hessian @ grad)
+        # np.dot calculates a vector dot product, used to test whether the search direction descends.
         grad_projection = float(np.dot(direction, grad))
 
         if grad_projection >= 0.0:

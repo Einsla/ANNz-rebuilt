@@ -122,6 +122,7 @@ def analyze_catalogue_csv(
         )
 
     sample = (
+        # concat joins sampled DataFrame pieces into one table; ignore_index creates a fresh row index.
         pd.concat(samples, ignore_index=True)
         if samples
         else pd.DataFrame(columns=sample_names)

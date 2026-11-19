@@ -96,6 +96,7 @@ def create_project_zip(
     }
 
     output = io.BytesIO()
+    # Build the project ZIP in memory; each writestr call stores one named file.
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(MANIFEST_NAME, json.dumps(manifest, indent=2) + "\n")
         if data_source_bytes is not None:
@@ -141,6 +142,7 @@ def open_project_zip(zip_bytes: bytes) -> ProjectArchive:
             names = set(archive.namelist())
             if MANIFEST_NAME not in names:
                 raise ValueError("This ZIP has no project.json manifest.")
+            # read gets bytes; decode turns UTF-8 bytes into text; json.loads parses text into Python objects.
             manifest = json.loads(archive.read(MANIFEST_NAME).decode("utf-8"))
             if manifest.get("format_version") not in {
                 1,

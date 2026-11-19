@@ -72,6 +72,7 @@ def _read_chunks(
     """Read a reusable file source in chunks and normalize its column names."""
     if hasattr(source, "seek"):
         source.seek(0)
+    # chunksize makes pandas yield smaller DataFrames instead of loading the whole catalogue.
     reader = pd.read_csv(source, sep=separator, chunksize=rows_per_batch)
     try:
         for chunk in reader:

@@ -202,6 +202,7 @@ def predict_committee(
             batch_predictions.append(output.detach().cpu().numpy().astype(np.float64))
             target_jacobian = []
             for target_index in range(architecture.n_outputs):
+                # autograd.grad obtains each member network sensitivity to its input features.
                 gradient = torch.autograd.grad(
                     output[:, target_index].sum(),
                     x,
@@ -217,6 +218,7 @@ def predict_committee(
         jacobians.append(np.concatenate(batch_jacobians, axis=0))
 
     member_values = np.stack(predictions, axis=0)
+    # NumPy mean averages predictions from all independently trained committee members.
     mean_prediction = member_values.mean(axis=0)
     member_count = len(members)
     if member_count > 2:

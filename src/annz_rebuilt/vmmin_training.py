@@ -30,6 +30,7 @@ def train_with_vmmin(
     Catalogue chunks are streamed from disk for each objective/gradient pass;
     the optimiser still uses the complete training-set objective and gradient.
     """
+    # model.parameters() provides the trainable weight and bias tensors held by PyTorch.
     parameters = [p for p in model.parameters()]
     parameter_count = sum(p.numel() for p in parameters)
     if parameter_count > max_dense_parameters:
@@ -89,6 +90,7 @@ def train_with_vmmin(
             y = torch.as_tensor(y_np, dtype=torch.float64, device=device)
             residual = model(x) - y
             sum_squares = torch.square(residual).sum()
+            # autograd.grad returns the derivative of the loss with respect to each parameter tensor.
             grads = torch.autograd.grad(sum_squares, parameters)
             for total, grad in zip(accumulated, grads):
                 total.add_(grad.detach())
@@ -128,6 +130,7 @@ def train_with_vmmin(
         if on_iteration is not None:
             on_iteration(index, vector, value)
 
+    # Run the translated legacy ANNzPlus variable-metric optimiser with the objective and gradient above.
     result = vmmin(
         initial_weights,
         objective,

@@ -33,6 +33,7 @@ from annz_rebuilt.neural_network import (  # noqa: E402
 )
 from annz_rebuilt.project import create_project_zip, open_project_zip  # noqa: E402
 
+# Streamlit configures the browser page before the app creates its widgets.
 st.set_page_config(
     page_title="Galaxy Neural Network Analysis", page_icon="🌌", layout="wide"
 )
@@ -309,6 +310,7 @@ st.caption(
     f"Previewing up to {len(preview):,} rows · {len(columns)} variables · "
     f"source: {data_source_name}"
 )
+# A pandas DataFrame is a table; st.dataframe displays it interactively in the browser.
 st.dataframe(preview.head(10), use_container_width=True)
 
 st.subheader("1. Choose the variables")
@@ -360,6 +362,7 @@ if st.button(
 ):
     try:
         with st.spinner("Scanning the catalogue in batches..."):
+            # Scan the catalogue in chunks; session_state preserves the result across Streamlit reruns.
             st.session_state["catalogue_analysis"] = analyze_catalogue_csv(
                 io.BytesIO(data_source_bytes),
                 separator=separator,
@@ -378,6 +381,7 @@ if analysis is not None:
     st.dataframe(quality_summary, use_container_width=True)
     selected = list(dict.fromkeys([*inputs, *targets]))
     selected = [name for name in selected if name in sample.columns]
+    # .loc selects named columns; pd.to_numeric converts values to numbers (invalid entries become NaN).
     sample_numbers = sample.loc[:, selected].apply(pd.to_numeric, errors="coerce")
     sample_numbers = sample_numbers.replace(
         [float("inf"), float("-inf")], float("nan")
@@ -910,6 +914,7 @@ if architecture is not None and preparation is not None:
     st.session_state["checkpoint_signature"] = model_signature
 
     st.subheader("6. Train the network")
+    # Streamlit widgets return the selected value; keys retain widget values between reruns.
     training_mode = st.radio(
         "Training mode",
         ["Single network", "Committee of networks"],

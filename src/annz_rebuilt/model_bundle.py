@@ -123,6 +123,7 @@ def create_model_bundle(
         },
     }
     output = io.BytesIO()
+    # ZipFile builds a compressed archive in memory; writestr adds files without temporary files.
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr(MANIFEST_NAME, json.dumps(manifest, indent=2) + "\n")
         archive.writestr("model/checkpoint.pt", checkpoint_bytes)
@@ -158,6 +159,7 @@ def create_model_bundle(
 def open_model_bundle(blob: bytes) -> ModelBundle:
     """Read and validate a portable model bundle, including legacy v1 bundles."""
     try:
+        # BytesIO makes uploaded bytes file-like, allowing ZipFile to read its entries.
         with zipfile.ZipFile(io.BytesIO(blob), "r") as archive:
             names = set(archive.namelist())
             if MANIFEST_NAME not in names:

@@ -52,9 +52,11 @@ def build_network(architecture: Architecture):
     ):
         if activation_name not in activations:
             raise ValueError(f"Unsupported activation: {activation_name}")
+        # nn.Linear creates a fully connected layer; the activation adds a non-linear transformation.
         layers.extend((nn.Linear(width, next_width), activations[activation_name]()))
         width = next_width
     layers.append(nn.Linear(width, architecture.n_outputs))
+    # Sequential chains the layer objects in order to form the network forward pass.
     return nn.Sequential(*layers)
 
 
@@ -193,6 +195,7 @@ def train_model(
         else int(initialization_seed)
     )
     model = build_network(architecture).to(target_device)
+    # Adam is PyTorch weight optimisation; model.parameters() supplies trainable weights and biases.
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     signature = _signature(architecture, preparation)
     history: list[dict] = []
@@ -245,9 +248,13 @@ def train_model(
                 continue
             x = torch.as_tensor(x_np, dtype=torch.float32, device=target_device)
             y = torch.as_tensor(y_np, dtype=torch.float32, device=target_device)
+            # Clear gradients from the previous mini-batch; PyTorch otherwise accumulates them.
             optimizer.zero_grad(set_to_none=True)
+            # mse_loss calculates mean squared difference between predictions and known target values.
             loss = nn.functional.mse_loss(model(x), y)
+            # backward() uses automatic differentiation to calculate how the loss changes with each weight.
             loss.backward()
+            # step() updates network weights using the gradients calculated by backward().
             optimizer.step()
             # PyTorch's mean MSE is already averaged over rows and targets.
             # Weight by batch rows, then divide by total rows (not rows ? targets).
@@ -467,6 +474,8 @@ def predict_single(
             output = model(x)
             gradients = []
             for target_index in range(architecture.n_outputs):
+                # autograd.grad calculates derivatives of the output with respect to each input feature.
+                # These derivatives form the Jacobian used to propagate measurement errors.
                 gradient = torch.autograd.grad(
                     output[:, target_index].sum(),
                     x,
@@ -509,6 +518,7 @@ def write_predictions_csv(
         source.seek(0)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    # Read prediction data in bounded-size DataFrame chunks to control memory use.
     reader = pd.read_csv(source, sep=separator, chunksize=preparation.rows_per_batch)
     offset = written = skipped = 0
     header = True

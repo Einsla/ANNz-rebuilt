@@ -67,7 +67,7 @@ The vmmin port is not yet end-to-end scientific parity: data normalisation, rand
 - `src/annz_rebuilt/`: reusable application and scientific-computing modules.
 - `tests/`: automated regression and workflow tests.
 - `docs/user-guide/`: local usage and project workflow documentation.
-- `docs/development/`: implementation notes and C++ parity assessment.
+- `docs/development/`: implementation notes, C++ parity assessment, and the [Python code reading guide](docs/development/PYTHON_CODE_READING_GUIDE.md) explaining library calls used throughout the app.
 - `docs/checkpoints/`: dated implementation checkpoints and resume notes.
 - `docs/research/`: research notes and meeting outcomes.
 - `installation/`: platform installation resources and guides.

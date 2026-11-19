@@ -94,6 +94,7 @@ class Architecture:
             raise ValueError("The dataset has no data rows.")
         invalid = []
         for name in columns:
+            # pd.to_numeric checks that catalogue values can be interpreted as numbers.
             values = pd.to_numeric(data[name], errors="coerce")
             if values.isna().any() or not values.map(math.isfinite).all():
                 invalid.append(name)
@@ -114,6 +115,7 @@ class Architecture:
         targets = data.loc[:, list(self.target_columns)].apply(
             pd.to_numeric, errors="raise"
         )
+        # reset_index(drop=True) gives both tables a clean 0..N-1 row index.
         return inputs.reset_index(drop=True), targets.reset_index(drop=True)
 
     def frame_prediction_data(self, data: pd.DataFrame) -> pd.DataFrame:
