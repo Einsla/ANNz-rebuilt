@@ -17,7 +17,7 @@ PROJECT_ROOT = Path(__file__).parent
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from annz_rebuilt import architecture_from_selections  # noqa: E402
-from annz_rebuilt.architecture import SUPPORTED_ACTIVATIONS  # noqa: E402
+from annz_rebuilt.architecture import SUPPORTED_ACTIVATIONS, NetworkStructure  # noqa: E402
 from annz_rebuilt.committee import (  # noqa: E402
     evaluate_committee,
     train_committee,
@@ -542,23 +542,27 @@ neurons = [
     for layer in range(int(layer_count))
 ]
 architecture = None
+network_structure = None
 try:
+    network_structure = NetworkStructure(tuple(inputs), tuple(targets), tuple(neurons))
     configured_activations = st.session_state.get("configured_hidden_activations")
     if configured_activations is not None and len(configured_activations) != len(
-        neurons
+        network_structure.hidden_layers
     ):
         configured_activations = None
-    architecture = architecture_from_selections(
-        inputs,
-        targets,
-        neurons,
-        activation,
-        hidden_activations=configured_activations,
+    # Keep manual training and legacy loading compatible; optimisation selects
+    # explicit per-layer functions and replaces this neutral placeholder.
+    architecture = network_structure.with_activations(
+        configured_activations or ("tanh",) * len(network_structure.hidden_layers)
     )
     st.caption(
-        f"Network: {architecture.n_inputs} input(s) → "
-        f"{' → '.join(map(str, architecture.hidden_layers))} → "
-        f"{architecture.n_outputs} output(s)"
+        f"Network structure: {len(network_structure.input_columns)} input(s) → "
+        f"{' → '.join(map(str, network_structure.hidden_layers))} → "
+        f"{len(network_structure.target_columns)} output(s)"
+    )
+    st.caption(
+        "Choose activation candidates for each hidden layer in the optimisation section. "
+        "If you skip optimisation and train directly, tanh is used in every hidden layer."
     )
 except ValueError as exc:
     st.info(f"Choose valid inputs and targets to configure the network: {exc}")
@@ -570,6 +574,7 @@ if (
     and architecture is not None
     and tuned_config.get("input_columns") == list(inputs)
     and tuned_config.get("target_columns") == list(targets)
+    and tuned_config.get("hidden_layers") == list(network_structure.hidden_layers)
 ):
     architecture = architecture_from_selections(
         tuned_config["input_columns"],
@@ -614,9 +619,7 @@ if architecture is not None and preparation is not None:
         )
         st.markdown("**Activation functions to test in each hidden layer**")
         activation_choices = []
-        for layer_index, default_activation in enumerate(
-            architecture.effective_activations
-        ):
+        for layer_index, _ in enumerate(network_structure.hidden_layers):
             if search_optimizer == "vmmin":
                 st.caption(
                     f"Hidden layer {layer_index + 1}: tanh (required by legacy vmmin)"
@@ -626,7 +629,7 @@ if architecture is not None and preparation is not None:
                 selected_activations = st.multiselect(
                     f"Hidden layer {layer_index + 1} — permitted activations",
                     sorted(SUPPORTED_ACTIVATIONS),
-                    default=[default_activation],
+                    default=[],
                     key=f"search_layer_{layer_index}_activations",
                     help="Select one or more functions. Every combination across layers will be tested.",
                 )
@@ -730,12 +733,8 @@ if architecture is not None and preparation is not None:
             best_score = float("inf")
             try:
                 for candidate_index, (activation_combo, rate) in enumerate(candidates):
-                    candidate_architecture = architecture_from_selections(
-                        inputs,
-                        targets,
-                        architecture.hidden_layers,
-                        activation,
-                        hidden_activations=activation_combo,
+                    candidate_architecture = network_structure.with_activations(
+                        activation_combo, legacy_activation=activation
                     )
                     activation_label = " / ".join(activation_combo)
                     search_status.write(
@@ -827,7 +826,8 @@ if architecture is not None and preparation is not None:
                     "learning_rates": [float(value) for value in search_learning_rates]
                     if search_optimizer == "adam"
                     else [],
-                    "fixed_hidden_layers": list(architecture.hidden_layers),
+                    "network_structure": network_structure.to_config_dict(),
+                    "fixed_hidden_layers": list(network_structure.hidden_layers),
                     "max_epochs": int(search_epochs),
                     "patience": int(search_patience)
                     if search_patience is not None
@@ -896,6 +896,7 @@ if architecture is not None and preparation is not None:
             for key in (
                 "auto_tuned_architecture",
                 "auto_tuning_results",
+                "configured_hidden_activations",
                 "trained_checkpoint",
                 "checkpoint_signature",
                 "training_history",
@@ -1302,7 +1303,7 @@ if (
         "test_fraction": preparation.test_fraction,
     }
     model_artifact = create_model_bundle(
-        architecture.to_config_dict(),
+        architecture.to_export_config_dict(),
         preparation.to_config_dict(),
         st.session_state["trained_checkpoint"],
         training_config=model_training_config,
@@ -1348,7 +1349,7 @@ if st.button("Prepare project ZIP"):
         )
     else:
         project_zip = create_project_zip(
-            architecture.to_config_dict(),
+            architecture.to_export_config_dict(),
             data_preparation_config=preparation.to_config_dict()
             if preparation
             else None,
@@ -1374,7 +1375,7 @@ if st.button("Prepare project ZIP"):
             optimisation_results=st.session_state.get("auto_tuning_results"),
         )
         reusable_config_zip = create_project_zip(
-            architecture.to_config_dict(),
+            architecture.to_export_config_dict(),
             data_preparation_config=preparation.to_config_dict()
             if preparation
             else None,
@@ -1400,7 +1401,7 @@ if st.button("Prepare project ZIP"):
         with col_a:
             st.download_button(
                 "Download architecture JSON",
-                json.dumps(architecture.to_config_dict(), indent=2),
+                json.dumps(architecture.to_export_config_dict(), indent=2),
                 file_name="architecture_config.json",
                 mime="application/json",
             )

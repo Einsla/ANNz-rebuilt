@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from annz_rebuilt.architecture import Architecture
+from annz_rebuilt.architecture import Architecture, NetworkStructure
 from annz_rebuilt.data_preparation import (
     DataPreparation,
     fit_data_preparation,
@@ -54,6 +54,38 @@ def prepared():
 def test_architecture_rejects_input_target_overlap():
     with pytest.raises(ValueError, match="distinct"):
         Architecture(("x",), ("x",), (8,))
+
+
+def test_network_structure_is_activation_independent():
+    structure = NetworkStructure(("g", "r"), ("z",), (16, 8))
+    assert structure.to_config_dict() == {
+        "input_columns": ["g", "r"],
+        "target_columns": ["z"],
+        "hidden_layers": [16, 8],
+    }
+    model_architecture = structure.with_activations(("relu", "tanh"))
+    assert model_architecture.hidden_layers == (16, 8)
+    assert model_architecture.effective_activations == ("relu", "tanh")
+    assert model_architecture.to_config_dict()["hidden_activations"] == [
+        "relu",
+        "tanh",
+    ]
+
+
+def test_architecture_export_always_lists_each_hidden_activation():
+    architecture = NetworkStructure(("g",), ("z",), (8, 4)).with_activations(
+        ("tanh", "tanh")
+    )
+    assert "hidden_activations" not in architecture.to_config_dict()
+    assert architecture.to_export_config_dict()["hidden_activations"] == [
+        "tanh",
+        "tanh",
+    ]
+
+
+def test_network_structure_rejects_invalid_topology():
+    with pytest.raises(ValueError, match="hidden layer"):
+        NetworkStructure(("g",), ("z",), ())
 
 
 def test_split_and_epoch_shuffle_are_reproducible(prepared):
