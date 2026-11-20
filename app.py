@@ -105,7 +105,6 @@ def restore_project(zip_bytes: bytes) -> None:
     st.session_state["targets"] = config.get("target_columns", [])
     layers = config.get("hidden_layers", [10])
     st.session_state["layer_count"] = len(layers)
-    st.session_state["activation"] = config.get("activation", "leaky_relu")
     st.session_state["configured_hidden_activations"] = config.get("hidden_activations")
     for index, size in enumerate(layers):
         st.session_state[f"layer_{index}"] = int(size)
@@ -172,7 +171,6 @@ if model_upload is not None:
             st.session_state["inputs"] = config["input_columns"]
             st.session_state["targets"] = config["target_columns"]
             st.session_state["layer_count"] = len(config["hidden_layers"])
-            st.session_state["activation"] = config["activation"]
             st.session_state["configured_hidden_activations"] = config.get(
                 "hidden_activations"
             )
@@ -525,8 +523,6 @@ else:
     st.info("Prepare the data splits before training.")
 
 st.subheader("4. Describe the network")
-st.session_state.setdefault("activation", "tanh")
-activation = st.session_state["activation"]  # Internal default for manual training.
 layer_count = st.number_input("Hidden layers", 1, 10, 1, step=1, key="layer_count")
 neurons = [
     int(
@@ -734,7 +730,7 @@ if architecture is not None and preparation is not None:
             try:
                 for candidate_index, (activation_combo, rate) in enumerate(candidates):
                     candidate_architecture = network_structure.with_activations(
-                        activation_combo, legacy_activation=activation
+                        activation_combo
                     )
                     activation_label = " / ".join(activation_combo)
                     search_status.write(

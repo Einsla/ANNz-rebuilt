@@ -55,9 +55,7 @@ class NetworkStructure:
             "hidden_layers": list(self.hidden_layers),
         }
 
-    def with_activations(
-        self, activations: Sequence[str], *, legacy_activation: str | None = None
-    ) -> "Architecture":
+    def with_activations(self, activations: Sequence[str]) -> "Architecture":
         """Create a trainable architecture after activation choices are known."""
         names = tuple(str(name).strip().lower() for name in activations)
         if not names:
@@ -66,7 +64,7 @@ class NetworkStructure:
             self.input_columns,
             self.target_columns,
             self.hidden_layers,
-            legacy_activation or names[0],
+            names[0],
             names,
         )
 
