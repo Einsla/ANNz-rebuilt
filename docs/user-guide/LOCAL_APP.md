@@ -46,11 +46,12 @@ For development:
 ## Optimisers
 
 Adam is the default mini-batch optimiser and uses a learning-rate setting.
-Legacy vmmin ports the original ANNzPlus Tanh/train.cpp variable-metric quasi-Newton
-algorithm. It evaluates the complete training-set objective and gradient,
+Legacy vmmin ports the original ANNzPlus variable-metric quasi-Newton
+algorithm and supports all seven implemented hidden activations: Tanh, Sigmoid,
+Leaky ReLU, ReLU, Mish, Softplus and SiLU. It evaluates the complete training-set objective and gradient,
 streaming the catalogue in bounded chunks between evaluations; it is not
 mini-batch SGD. It uses a dense inverse-Hessian approximation (O(P**2) CPU
-memory for P weights), is restricted to tanh hidden activations, and follows
+memory for P weights), and follows
 the legacy convergence/reset rules rather than validation-patience early
 stopping. Use smaller networks with vmmin and Adam for larger architectures.
 Existing L-BFGS checkpoints can restore their model weights, but vmmin starts

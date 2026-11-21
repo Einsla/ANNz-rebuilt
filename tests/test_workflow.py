@@ -273,6 +273,30 @@ def test_mixed_activation_checkpoint_can_be_reloaded(prepared):
     assert architecture.to_config_dict()["hidden_activations"] == ["relu", "tanh"]
 
 
+@pytest.mark.parametrize(
+    "activation",
+    ["tanh", "sigmoid", "leaky_relu", "relu", "mish", "softplus", "silu"],
+)
+def test_vmmin_trains_with_each_supported_activation(prepared, activation):
+    source, preparation, _ = prepared
+    architecture = Architecture(
+        ("x1", "x2"),
+        ("z", "mass"),
+        (4,),
+        activation,
+    )
+    trained = train_model(
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=2,
+        optimizer_name="vmmin",
+        device="cpu",
+    )
+    assert trained["checkpoint_bytes"]
+    assert trained["completed_epoch"] >= 1
+
+
 def test_project_zip_round_trip(prepared):
     source, preparation, architecture = prepared
     blob = create_project_zip(

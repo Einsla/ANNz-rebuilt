@@ -154,7 +154,7 @@ def restore_project(zip_bytes: bytes) -> None:
 
 
 model_upload = st.file_uploader(
-    "Load a trained ANNzPlus model (.annzmodel) â€” no retraining required",
+    "Load a trained ANNzPlus model (.annzmodel)  -  no retraining required",
     type=["annzmodel"],
     key="trained_model_upload",
     help="Restores network weights, architecture, fitted scaling, optimiser settings and loss history. Upload a prediction catalogue below.",
@@ -328,13 +328,13 @@ if st.session_state.get("model_bundle_loaded"):
     )
 else:
     inputs = st.multiselect(
-        "Input variables â€” what information should the model use?",
+        "Input variables  -  what information should the model use?",
         columns,
         key="inputs",
         help="For example: veldisp, deVAB_u, and deVRad_u.",
     )
     targets = st.multiselect(
-        "Target variable(s) â€” what should the model learn to predict?",
+        "Target variable(s)  -  what should the model learn to predict?",
         columns,
         key="targets",
         help="For example: z. Inputs and targets must be separate.",
@@ -550,8 +550,8 @@ try:
         configured_activations or ("tanh",) * len(network_structure.hidden_layers)
     )
     st.caption(
-        f"Network structure: {len(network_structure.input_columns)} input(s) â†’ "
-        f"{' â†’ '.join(map(str, network_structure.hidden_layers))} â†’ "
+        f"Network structure: {len(network_structure.input_columns)} input(s)  ->  "
+        f"{'  ->  '.join(map(str, network_structure.hidden_layers))}  ->  "
         f"{len(network_structure.target_columns)} output(s)"
     )
     st.caption(
@@ -604,24 +604,18 @@ if architecture is not None and preparation is not None:
                 else "Legacy ANNzPlus vmmin"
             ),
             key="search_optimizer",
-            help="Adam supports all listed activations. The legacy vmmin implementation requires tanh in every hidden layer.",
+            help="Both Adam and legacy vmmin support the listed activation functions. vmmin uses a dense inverse-Hessian approximation in CPU memory.",
         )
         st.markdown("**Activation functions to test in each hidden layer**")
         activation_choices = []
         for layer_index, _ in enumerate(network_structure.hidden_layers):
-            if search_optimizer == "vmmin":
-                st.caption(
-                    f"Hidden layer {layer_index + 1}: tanh (required by legacy vmmin)"
-                )
-                selected_activations = ["tanh"]
-            else:
-                selected_activations = st.multiselect(
-                    f"Hidden layer {layer_index + 1} â€” permitted activations",
-                    sorted(SUPPORTED_ACTIVATIONS),
-                    default=[],
-                    key=f"search_layer_{layer_index}_activations",
-                    help="Select one or more functions. Every combination across layers will be tested.",
-                )
+            selected_activations = st.multiselect(
+                f"Hidden layer {layer_index + 1}  -  permitted activations",
+                sorted(SUPPORTED_ACTIVATIONS),
+                default=[],
+                key=f"search_layer_{layer_index}_activations",
+                help="Select one or more functions. Every combination across layers will be tested with the selected optimiser.",
+            )
             activation_choices.append(selected_activations)
 
         search_col1, search_col2 = st.columns(2)
@@ -667,7 +661,7 @@ if architecture is not None and preparation is not None:
                 )
             st.write("**Fixed network architecture**")
             st.code(
-                " â†’ ".join(
+                "  ->  ".join(
                     map(
                         str,
                         [
@@ -680,7 +674,7 @@ if architecture is not None and preparation is not None:
             )
         if search_optimizer == "vmmin":
             st.warning(
-                "Legacy vmmin requires tanh in every hidden layer and stores a dense inverse-Hessian matrix in CPU memory. Large networks may exceed its safety limit."
+                "Legacy vmmin supports the listed activation functions, but stores a dense inverse-Hessian matrix in CPU memory. Large networks may exceed its safety limit."
             )
 
         valid_activation_choices = all(activation_choices) and all(
@@ -691,7 +685,7 @@ if architecture is not None and preparation is not None:
         )
         candidate_count = len(activation_combinations) * len(search_learning_rates)
         st.caption(
-            f"Planned search: {len(activation_combinations)} activation combinations Ã— "
+            f"Planned search: {len(activation_combinations)} activation combinations  -  "
             f"{len(search_learning_rates)} learning-rate settings = {candidate_count} candidates. "
             f"Architecture fixed at {list(architecture.hidden_layers)}."
         )
@@ -745,13 +739,13 @@ if architecture is not None and preparation is not None:
                     ):
                         if event["validation_loss"] is None:
                             message = (
-                                f"Candidate {candidate_index + 1}/{len(candidates)} â€” "
+                                f"Candidate {candidate_index + 1}/{len(candidates)}  -  "
                                 f"{step_label} {event['epoch']}"
                             )
                         else:
                             message = (
-                                f"Candidate {candidate_index + 1}/{len(candidates)} â€” "
-                                f"{step_label} {event['epoch']} â€” validation loss "
+                                f"Candidate {candidate_index + 1}/{len(candidates)}  -  "
+                                f"{step_label} {event['epoch']}  -  validation loss "
                                 f"{event['validation_loss']:.6g}"
                             )
                         search_status.write(message)
@@ -946,7 +940,7 @@ if architecture is not None and preparation is not None:
             "Adam" if value == "adam" else "Legacy ANNzPlus vmmin"
         ),
         key="optimizer_name",
-        help="Legacy ANNzPlus training method. It requires tanh in every hidden layer and uses additional CPU memory for its optimisation state.",
+        help="Legacy ANNzPlus training method. It supports the listed activation functions but uses additional CPU memory for its dense inverse-Hessian approximation.",
     )
     train_left, train_mid = st.columns(2)
     with train_left:
@@ -979,12 +973,8 @@ if architecture is not None and preparation is not None:
         st.warning(
             "Legacy vmmin stores a dense inverse-Hessian approximation in CPU memory. Large networks may exceed its safety limit; use a smaller network or Adam."
         )
-        if any(name != "tanh" for name in architecture.effective_activations):
-            st.error(
-                "The legacy vmmin optimiser requires tanh in every hidden layer. Choose tanh for every layer in the optimisation section, or use Adam."
-            )
     st.caption(
-        "Adam updates weights after each mini-batch. Legacy vmmin evaluates the full training objective and gradient by streaming chunks; its dense inverse-Hessian matrix uses O(weights?) CPU memory. "
+        "Adam updates weights after each mini-batch. Legacy vmmin evaluates the full training objective and gradient by streaming chunks; its dense inverse-Hessian approximation uses O(P²) CPU memory, where P is the number of trainable parameters. "
         "When continuing with the same optimiser, its saved state is restored; switching optimisers "
         "keeps the network weights but starts fresh optimiser state."
     )
@@ -993,13 +983,7 @@ if architecture is not None and preparation is not None:
         if training_mode == "Committee of networks"
         else "Start / continue training",
         type="primary",
-        disabled=(
-            st.session_state.get("model_bundle_loaded", False)
-            or (
-                optimizer_choice == "vmmin"
-                and any(name != "tanh" for name in architecture.effective_activations)
-            )
-        ),
+        disabled=(st.session_state.get("model_bundle_loaded", False)),
     ):
         progress = st.progress(0)
         status = st.empty()
@@ -1014,7 +998,7 @@ if architecture is not None and preparation is not None:
                 st.session_state["trained_checkpoint"] = event["checkpoint_bytes"]
             st.session_state["last_epoch"] = event["epoch"]
             member_label = (
-                f"Member {event['member']}/{event['committee_size']} ? "
+                f"Member {event['member']}/{event['committee_size']} - "
                 if "member" in event
                 else ""
             )

@@ -28,7 +28,7 @@ The upstream repository contains one implementation directory per activation fun
 - Chunked catalogue analysis, row validation, deterministic train/validation/test split assignment, and scaling fitted on training rows only.
 - Fully connected PyTorch regression network with bias terms, configurable hidden-layer widths, seven activation choices assignable independently to each hidden layer, and linear outputs.
 - **Adam:** mini-batch training with a user-selected learning rate. Mini-batches are shuffled within source chunks with a deterministic epoch-specific seed.
-- **legacy vmmin:** A Python translation of the original dense variable-metric update, line-search acceptance, reset rules and periodic weight-decay hyperparameter update in Tanh/train.cpp.
+- **legacy vmmin:** A Python translation of the original dense variable-metric update, line-search acceptance, reset rules and periodic weight-decay hyperparameter update in the activation-specific C++ implementations.
 - Validation MSE is monitored during training. The optimiser keeps the user-described layer count and neuron widths fixed, exhaustively tests the selected activation-function combinations independently across hidden layers, and ranks candidates by validation loss. Adam candidates support early stopping; the test split is not used for model selection. The search is capped at 24 candidates.
 - Checkpoints preserve model weights, optimiser state, epoch history and a signature of the architecture/data-preparation settings.
 - Prediction export is chunked and limits inference batch size on the selected device.
@@ -44,7 +44,7 @@ The upstream repository contains one implementation directory per activation fun
 ## Important differences from C++
 
 1. Python fits scaling on training rows only to avoid validation leakage. The C++ code calculates its normalization using both training and validation rows.
-2. Python currently does not include the C++ weight-decay term.
+2. The Python vmmin path includes the legacy periodic weight-decay update. Adam is a separate optimiser path and does not reproduce the legacy vmmin weight-decay procedure.
 3. Python now ports the legacy vmmin update and line-search procedure. End-to-end parity still depends on matching data normalisation, weight initialisation, objective conventions and floating-point execution.
 4. Python uses named CSV/TSV columns rather than the original whitespace-delimited ANNz+ record format.
 5. The Python implementation accepts named input/error-column mappings at prediction time rather than the original fixed-width whitespace record layout. Input errors are assumed independent; correlated measurement errors would require a covariance matrix. The single-network Jacobian path is an extension; the committee path follows the C++ ensemble equations.
@@ -75,7 +75,7 @@ The optimisation objective is mean squared error in the scaled target space. The
 
 The committee and input measurement-error propagation work is merged into `main` at commit `7b1634c`. Single-network Jacobian propagation and committee uncertainty are both available in prediction mode, with named input-to-error-column mapping. Mappings are persisted in model bundles and project configuration. The full milestone, verification results and resume instructions are recorded in [the dated checkpoint](../checkpoints/2026-11-19-committee-and-input-error-propagation.md).
 
-The automated suite currently passes 27 tests, with Ruff lint/format checks and Python compilation also passing. This confirms software regression coverage, not numerical scientific parity with C++.
+The 19 November checkpoint recorded 27 tests on that milestone. The current feature branch adds seven vmmin activation regression cases; its latest local verification passes 37 tests, Ruff lint/format checks and Python compilation. This confirms software regression coverage, not numerical scientific parity with C++.
 
 ## Parity work still required
 
@@ -109,8 +109,7 @@ float64 for the legacy dense variable-metric matrix.
 
 ### Important constraints and parity gaps
 
-- This is a port of the Tanh implementation. The UI restricts vmmin optimisation
-  candidates to tanh in every hidden layer. Adam retains all supported activations.
+- The original C++ repository has activation-specific vmmin implementations for Tanh, Sigmoid, Leaky ReLU, ReLU, Mish, Softplus and SiLU. The Python vmmin path uses autograd and supports all seven activations; activation choice is not restricted to Tanh.
 - The inverse-Hessian approximation is dense, requiring O(P**2) CPU memory for
   P network weights. A safety limit prevents excessive matrix allocation.
   Adam is recommended for larger networks.
