@@ -273,6 +273,71 @@ def test_mixed_activation_checkpoint_can_be_reloaded(prepared):
     assert architecture.to_config_dict()["hidden_activations"] == ["relu", "tanh"]
 
 
+def _assert_selected_checkpoint_history_matches_saved_checkpoint(
+    prepared, monkeypatch, optimizer_name
+):
+    source, preparation, architecture = prepared
+    validation_losses = iter([1.0, 0.5, 0.8, 0.9, 0.4, 0.6, 0.7])
+
+    def controlled_validation_loss(*args, **kwargs):
+        return next(validation_losses)
+
+    monkeypatch.setattr(
+        "annz_rebuilt.neural_network._validation_loss", controlled_validation_loss
+    )
+    trained = train_model(
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=3,
+        optimizer_name=optimizer_name,
+        device="cpu",
+    )
+    torch = pytest.importorskip("torch")
+    saved = torch.load(
+        io.BytesIO(trained["checkpoint_bytes"]),
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    assert saved["epoch"] == trained["completed_epoch"]
+    assert saved["best_epoch"] == trained["best_epoch"]
+    assert trained["best_epoch"] <= trained["completed_epoch"]
+    assert trained["history"]["epoch"].tolist() == [
+        row["epoch"] for row in saved["history"]
+    ]
+
+    continued = train_model(
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=1,
+        optimizer_name=optimizer_name,
+        checkpoint_bytes=trained["checkpoint_bytes"],
+        device="cpu",
+    )
+    continued_state = torch.load(
+        io.BytesIO(continued["checkpoint_bytes"]),
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert continued["completed_epoch"] >= trained["completed_epoch"]
+    assert continued["best_epoch"] == trained["best_epoch"]
+    assert continued_state["best_epoch"] == trained["best_epoch"]
+    assert continued["history"]["epoch"].tolist()[: len(trained["history"])] == (
+        trained["history"]["epoch"].tolist()
+    )
+
+
+@pytest.mark.parametrize("optimizer_name", ["adam", "vmmin"])
+def test_selected_checkpoint_history_is_consistent(
+    prepared, monkeypatch, optimizer_name
+):
+    _assert_selected_checkpoint_history_matches_saved_checkpoint(
+        prepared, monkeypatch, optimizer_name
+    )
+
+
 @pytest.mark.parametrize(
     "activation",
     ["tanh", "sigmoid", "leaky_relu", "relu", "mish", "softplus", "silu"],

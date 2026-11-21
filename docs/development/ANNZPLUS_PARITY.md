@@ -30,7 +30,7 @@ The upstream repository contains one implementation directory per activation fun
 - **Adam:** mini-batch training with a user-selected learning rate. Mini-batches are shuffled within source chunks with a deterministic epoch-specific seed.
 - **legacy vmmin:** A Python translation of the original dense variable-metric update, line-search acceptance, reset rules and periodic weight-decay hyperparameter update in the activation-specific C++ implementations.
 - Validation MSE is monitored during training. The optimiser keeps the user-described layer count and neuron widths fixed, exhaustively tests the selected activation-function combinations independently across hidden layers, and ranks candidates by validation loss. Adam candidates support early stopping; the test split is not used for model selection. The search is capped at 24 candidates.
-- Checkpoints preserve model weights, optimiser state, epoch history and a signature of the architecture/data-preparation settings.
+- Checkpoints preserve the best validation-loss weights and matching optimiser state, the full completed-run history, a monotonic completed-step counter, and a signature of the architecture/data-preparation settings. The history remains available when training is continued from the selected best checkpoint.
 - Prediction export is chunked and limits inference batch size on the selected device.
 - Committee training creates independently initialised members using the same architecture and fixed data splits; each member retains its best validation-loss checkpoint. Committee predictions are the arithmetic mean of member predictions.
 - Committee inference reproduces `Tanh/test.cpp`: for more than two members it uses the sample-variance correction `M/(M-1) * (mean(y_member^2) - mean(y_member)^2)`; for one or two members the committee scatter term is zero, as in the C++ implementation.
@@ -71,11 +71,13 @@ It uses the training-target mean as its reference. R2 uses the evaluated split's
 
 The optimisation objective is mean squared error in the scaled target space. The reported MAE/RMSE are converted back to the original target units.
 
-## Current integrated checkpoint (19 November 2026)
+## Integrated milestone and current feature branch (22 November 2026)
 
-The committee and input measurement-error propagation work is merged into `main` at commit `7b1634c`. Single-network Jacobian propagation and committee uncertainty are both available in prediction mode, with named input-to-error-column mapping. Mappings are persisted in model bundles and project configuration. The full milestone, verification results and resume instructions are recorded in [the dated checkpoint](../checkpoints/2026-11-19-committee-and-input-error-propagation.md).
+The committee and input measurement-error propagation milestone is recorded in [the 19 November checkpoint](../checkpoints/2026-11-19-committee-and-input-error-propagation.md) and remains on `main`. The active feature branch additionally includes shared training validation, all-seven-activation vmmin support for individual and committee training, and a checkpoint/history consistency fix for both Adam and vmmin.
 
-The 19 November checkpoint recorded 27 tests on that milestone. The current feature branch adds seven vmmin activation regression cases; its latest local verification passes 37 tests, Ruff lint/format checks and Python compilation. This confirms software regression coverage, not numerical scientific parity with C++.
+When validation data is available, the exported checkpoint retains the weights and optimiser state from the best validation-loss iteration. Its epoch counter and embedded loss history still record the full completed run, so continuing training does not repeat epoch numbers or discard later training records. For vmmin, the selected checkpoint also retains the weight-decay alpha/beta values associated with the selected weights.
+
+The latest verification result is recorded in the [22 November code-review checkpoint](../checkpoints/2026-11-22-deep-code-review.md). Passing software tests confirms regression behaviour, not numerical scientific parity with C++.
 
 ## Parity work still required
 

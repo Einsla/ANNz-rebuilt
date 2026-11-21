@@ -119,9 +119,6 @@ def vmmin(
         # update below; the inverse Hessian is reset at the next outer pass.
         minimum = current
         grad_count += 1
-        if on_iteration is not None:
-            on_iteration(grad_count, weights.copy(), minimum)
-
         grad = np.asarray(gradient(weights), dtype=np.float64)
         displacement = step_length * direction
         gradient_change = grad - previous_gradient
@@ -149,6 +146,9 @@ def vmmin(
             # The legacy training code changes alpha/beta and reevaluates E.
             current = float(objective(weights))
             minimum = current
+
+        if on_iteration is not None:
+            on_iteration(grad_count, weights.copy(), minimum)
 
     return VMMinResult(
         weights=weights,

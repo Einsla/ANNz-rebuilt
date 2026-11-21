@@ -35,7 +35,7 @@ from annz_rebuilt.project import create_project_zip, open_project_zip  # noqa: E
 
 # Streamlit configures the browser page before the app creates its widgets.
 st.set_page_config(
-    page_title="Galaxy Neural Network Analysis", page_icon="ðŸŒŒ", layout="wide"
+    page_title="Galaxy Neural Network Analysis", page_icon="\U0001f30c", layout="wide"
 )
 st.title("Galaxy Neural Network Analysis")
 st.write(
@@ -303,7 +303,7 @@ for key in ("inputs", "targets"):
         ]
 
 st.caption(
-    f"Previewing up to {len(preview):,} rows Â· {len(columns)} variables Â· "
+    f"Previewing up to {len(preview):,} rows \u00b7 {len(columns)} variables \u00b7 "
     f"source: {data_source_name}"
 )
 # A pandas DataFrame is a table; st.dataframe displays it interactively in the browser.
@@ -677,16 +677,23 @@ if architecture is not None and preparation is not None:
                 "Legacy vmmin supports the listed activation functions, but stores a dense inverse-Hessian matrix in CPU memory. Large networks may exceed its safety limit."
             )
 
-        valid_activation_choices = all(activation_choices) and all(
-            choices for choices in activation_choices
-        )
+        valid_activation_choices = all(activation_choices)
         activation_combinations = (
             list(product(*activation_choices)) if valid_activation_choices else []
         )
         candidate_count = len(activation_combinations) * len(search_learning_rates)
+        if search_optimizer == "adam":
+            search_summary = (
+                f"{len(activation_combinations)} activation combinations × "
+                f"{len(search_learning_rates)} learning-rate settings"
+            )
+        else:
+            search_summary = (
+                f"{len(activation_combinations)} activation combinations "
+                "(vmmin does not use a learning rate)"
+            )
         st.caption(
-            f"Planned search: {len(activation_combinations)} activation combinations  -  "
-            f"{len(search_learning_rates)} learning-rate settings = {candidate_count} candidates. "
+            f"Planned search: {search_summary} = {candidate_count} candidates. "
             f"Architecture fixed at {list(architecture.hidden_layers)}."
         )
         if candidate_count > 24:

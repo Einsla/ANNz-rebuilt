@@ -2,6 +2,8 @@
 
 ## Purpose and scope
 
+The latest feature-branch review and checkpoint continuation behaviour are recorded in the [22 November 2026 checkpoint](../checkpoints/2026-11-22-deep-code-review.md).
+
 This document distinguishes behaviour reproduced from the original [ANNzPlus C++ repository](https://github.com/imdadmpt/ANNzPlus) from Python implementation choices and work that still needs scientific validation. "Implemented" means the feature exists in the Python app; it does not automatically mean bit-for-bit or scientifically identical output.
 
 ## At-a-glance comparison
@@ -27,7 +29,7 @@ This document distinguishes behaviour reproduced from the original [ANNzPlus C++
 | Input measurement errors | Input rows include measurement-error values; used by test/committee uncertainty calculation, not as extra network inputs | User maps named error columns at prediction time; errors are not added to network inputs |
 | Error propagation | Uses network Jacobians and committee rules | Uses PyTorch Jacobians and propagates independent errors in quadrature; committee path follows legacy equations |
 | Evaluation | Legacy photo-z outputs and metrics | MAE, RMSE, R-squared, predictive Q-squared and recognised photo-z metrics |
-| Model persistence | Legacy network state/weight files | Model bundles and project ZIPs preserve weights, architecture, scaling, settings, history and available optimiser/checkpoint state |
+| Model persistence | Legacy network state/weight files | Model bundles and project ZIPs preserve best-validation weights, matching optimiser state, architecture, scaling, settings, full run history and a monotonic continuation counter |
 
 ## Optimisers in the Python app
 
@@ -48,6 +50,7 @@ This document distinguishes behaviour reproduced from the original [ANNzPlus C++
 - Supports the seven activation functions listed above. The original C++ project has separate activation-specific implementations; vmmin is not limited to Tanh.
 - Memory for the dense inverse-Hessian matrix grows approximately as 8P^2 bytes (before other process/model memory), so large networks can exceed the safety limit. Adam is recommended when P is large.
 - Validation is recorded for model selection, but vmmin uses its own convergence rules rather than Adam-style patience-based early stopping.
+- The returned checkpoint uses the best validation-loss weights and matching vmmin alpha/beta values. Its epoch counter and full loss history preserve the completed run, so a later continuation starts with the next epoch/iteration number rather than replaying or losing history.
 
 ## Important scientific differences and limitations
 

@@ -1,5 +1,7 @@
 ﻿# Local app quick start
 
+For the latest reviewed implementation state and known parity gaps, see the [22 November 2026 code-review checkpoint](../checkpoints/2026-11-22-deep-code-review.md).
+
 ## Windows installation
 
 1. Download and extract the complete repository.
@@ -68,6 +70,7 @@ Choose **Download reusable settings ZIP** to save a portable configuration witho
 - Winning architecture: input/target columns, hidden-layer layout, and activation.
 - Data-preparation settings: split fractions, random seed, batch sizes, and training-only scaling values.
 - Training settings: optimiser, learning rate when applicable, automatic compute-device setting (CUDA when available, otherwise CPU), and epoch/iteration setting.
+- Checkpoint consistency: best-validation weights and their matching optimiser state are saved together with the full run history and a monotonic continuation counter. Continuing training therefore does not duplicate epoch/iteration numbers or discard the previous run history.
 - Optimisation recipe: automatic/manual mode, selected optimiser, candidate layouts, activations, learning rates when using Adam, maximum epochs/iterations, early-stopping patience, and validation-based selection metric.
 - Ranked optimisation results, training history, and the model checkpoint when available.
 - Original catalogue filename and SHA-256 fingerprint, but not the catalogue itself.
@@ -83,7 +86,7 @@ To reuse after restarting the app:
 
 Choose **Download full project ZIP** to save reusable settings plus optional original catalogue data and available analysis reports. If source data is excluded, upload the matching catalogue when reopening the ZIP.
 
-The archive contains a versioned `project.json` manifest, a README, and optional `data/`, `analysis/`, and `training/` members. Older project ZIP formats (versions 1â€“4) remain readable.
+The archive contains a versioned `project.json` manifest, a README, and optional `data/`, `analysis/`, and `training/` members. Project ZIP formats 1 through 5 are supported.
 
 ## Prediction output
 
