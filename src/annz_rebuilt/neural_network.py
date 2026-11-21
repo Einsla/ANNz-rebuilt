@@ -154,6 +154,14 @@ def train_model(
 ) -> dict:
     """Dispatch training to Adam or the legacy ANNzPlus vmmin implementation."""
     optimizer_name = str(optimizer_name).strip().lower()
+    if optimizer_name not in {"adam", "vmmin"}:
+        raise ValueError("Choose either Adam or legacy ANNzPlus vmmin.")
+    if epochs < 1:
+        raise ValueError("Maximum training iterations must be positive.")
+    if tuple(architecture.input_columns) != preparation.input_columns:
+        raise ValueError("Network inputs do not match the prepared data.")
+    if tuple(architecture.target_columns) != preparation.target_columns:
+        raise ValueError("Network targets do not match the prepared data.")
     if early_stopping_patience is not None and early_stopping_patience < 1:
         raise ValueError("Early-stopping patience must be at least one.")
     if optimizer_name == "adam":
@@ -171,12 +179,6 @@ def train_model(
             on_epoch=on_epoch,
         )
     elif optimizer_name == "vmmin":
-        if epochs < 1:
-            raise ValueError("Maximum vmmin iterations must be positive.")
-        if tuple(architecture.input_columns) != preparation.input_columns:
-            raise ValueError("Network inputs do not match the prepared data.")
-        if tuple(architecture.target_columns) != preparation.target_columns:
-            raise ValueError("Network targets do not match the prepared data.")
         return _train_vmmin(
             source,
             architecture,
@@ -208,12 +210,8 @@ def _train_adam(
     on_epoch,
 ) -> dict:
     """Train the network using PyTorch's mini-batch Adam optimiser."""
-    if epochs < 1 or not np.isfinite(learning_rate) or learning_rate <= 0:
-        raise ValueError("Epochs and learning rate must be positive and finite.")
-    if tuple(architecture.input_columns) != preparation.input_columns:
-        raise ValueError("Network inputs do not match the prepared data.")
-    if tuple(architecture.target_columns) != preparation.target_columns:
-        raise ValueError("Network targets do not match the prepared data.")
+    if not np.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError("Learning rate must be positive and finite.")
     if early_stopping_patience is not None and preparation.validation_fraction <= 0:
         raise ValueError("Early stopping requires a non-empty validation split.")
     torch, nn = _torch()
