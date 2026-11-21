@@ -72,10 +72,6 @@ def train_committee(
     """Train independent members against the same fixed data splits."""
     if not 1 <= committee_size <= 100:
         raise ValueError("Committee size must be between 1 and 100.")
-    if optimizer_name.lower().replace("-", "") in {"vmmin", "legacy_vmmin"} and any(
-        name != "tanh" for name in architecture.effective_activations
-    ):
-        raise ValueError("Legacy vmmin committees require tanh in every hidden layer.")
     seed = preparation.random_seed if base_seed is None else int(base_seed)
     checkpoints: list[bytes] = []
     histories: list[pd.DataFrame] = []
