@@ -35,7 +35,7 @@ from annz_rebuilt.project import create_project_zip, open_project_zip  # noqa: E
 
 # Streamlit configures the browser page before the app creates its widgets.
 st.set_page_config(
-    page_title="Galaxy Neural Network Analysis", page_icon="🌌", layout="wide"
+    page_title="Galaxy Neural Network Analysis", page_icon="ðŸŒŒ", layout="wide"
 )
 st.title("Galaxy Neural Network Analysis")
 st.write(
@@ -63,10 +63,10 @@ def restore_project(zip_bytes: bytes) -> None:
     st.session_state["auto_tuning_results"] = project.optimisation_results
     optimisation = saved_training.get("optimisation", {})
     saved_optimizer = saved_training.get("optimizer", "adam")
-    if saved_optimizer == "lbfgs":
+    if saved_optimizer in {"lbfgs", "quasinewton", "legacy_vmmin"}:
         saved_optimizer = "vmmin"
     saved_search_optimizer = optimisation.get("optimizer", saved_optimizer)
-    if saved_search_optimizer == "lbfgs":
+    if saved_search_optimizer in {"lbfgs", "quasinewton", "legacy_vmmin"}:
         saved_search_optimizer = "vmmin"
     if optimisation.get("completed"):
         st.session_state["auto_tuned_architecture"] = config
@@ -90,7 +90,6 @@ def restore_project(zip_bytes: bytes) -> None:
             if saved_training.get("committee_enabled", False)
             else "Single network",
         ),
-        ("compute_device", saved_training.get("device", "auto")),
     ):
         st.session_state[key] = value
     st.session_state["loaded_project_fingerprint"] = hashlib.sha256(
@@ -155,7 +154,7 @@ def restore_project(zip_bytes: bytes) -> None:
 
 
 model_upload = st.file_uploader(
-    "Load a trained ANNzPlus model (.annzmodel) — no retraining required",
+    "Load a trained ANNzPlus model (.annzmodel) â€” no retraining required",
     type=["annzmodel"],
     key="trained_model_upload",
     help="Restores network weights, architecture, fitted scaling, optimiser settings and loss history. Upload a prediction catalogue below.",
@@ -201,7 +200,6 @@ if model_upload is not None:
             st.session_state["learning_rate"] = (
                 bundle.training_config.get("learning_rate") or 0.001
             )
-            st.session_state["compute_device"] = "auto"
             st.session_state["model_bundle_loaded"] = True
             st.session_state["loaded_model_bundle_fingerprint"] = model_fingerprint
             st.session_state["checkpoint_signature"] = _model_signature(
@@ -305,7 +303,7 @@ for key in ("inputs", "targets"):
         ]
 
 st.caption(
-    f"Previewing up to {len(preview):,} rows · {len(columns)} variables · "
+    f"Previewing up to {len(preview):,} rows Â· {len(columns)} variables Â· "
     f"source: {data_source_name}"
 )
 # A pandas DataFrame is a table; st.dataframe displays it interactively in the browser.
@@ -330,13 +328,13 @@ if st.session_state.get("model_bundle_loaded"):
     )
 else:
     inputs = st.multiselect(
-        "Input variables — what information should the model use?",
+        "Input variables â€” what information should the model use?",
         columns,
         key="inputs",
         help="For example: veldisp, deVAB_u, and deVRad_u.",
     )
     targets = st.multiselect(
-        "Target variable(s) — what should the model learn to predict?",
+        "Target variable(s) â€” what should the model learn to predict?",
         columns,
         key="targets",
         help="For example: z. Inputs and targets must be separate.",
@@ -552,8 +550,8 @@ try:
         configured_activations or ("tanh",) * len(network_structure.hidden_layers)
     )
     st.caption(
-        f"Network structure: {len(network_structure.input_columns)} input(s) → "
-        f"{' → '.join(map(str, network_structure.hidden_layers))} → "
+        f"Network structure: {len(network_structure.input_columns)} input(s) â†’ "
+        f"{' â†’ '.join(map(str, network_structure.hidden_layers))} â†’ "
         f"{len(network_structure.target_columns)} output(s)"
     )
     st.caption(
@@ -581,12 +579,7 @@ if (
     )
 
 if architecture is not None and preparation is not None:
-    device_choice = st.selectbox(
-        "Compute device for training and optimisation",
-        ["auto", "cpu", "cuda"],
-        index=0,
-        key="compute_device",
-    )
+    device_choice = "auto"  # CUDA when available; otherwise CPU.
     st.subheader("5. Optimise the network")
     st.write(
         "The architecture you described above is kept fixed. Optimisation tests "
@@ -608,7 +601,7 @@ if architecture is not None and preparation is not None:
             format_func=lambda value: (
                 "Adam (mini-batch gradient optimisation)"
                 if value == "adam"
-                else "Legacy ANNzPlus vmmin (variable-metric quasi-Newton)"
+                else "Legacy ANNzPlus vmmin"
             ),
             key="search_optimizer",
             help="Adam supports all listed activations. The legacy vmmin implementation requires tanh in every hidden layer.",
@@ -623,7 +616,7 @@ if architecture is not None and preparation is not None:
                 selected_activations = ["tanh"]
             else:
                 selected_activations = st.multiselect(
-                    f"Hidden layer {layer_index + 1} — permitted activations",
+                    f"Hidden layer {layer_index + 1} â€” permitted activations",
                     sorted(SUPPORTED_ACTIVATIONS),
                     default=[],
                     key=f"search_layer_{layer_index}_activations",
@@ -674,7 +667,7 @@ if architecture is not None and preparation is not None:
                 )
             st.write("**Fixed network architecture**")
             st.code(
-                " → ".join(
+                " â†’ ".join(
                     map(
                         str,
                         [
@@ -698,7 +691,7 @@ if architecture is not None and preparation is not None:
         )
         candidate_count = len(activation_combinations) * len(search_learning_rates)
         st.caption(
-            f"Planned search: {len(activation_combinations)} activation combinations × "
+            f"Planned search: {len(activation_combinations)} activation combinations Ã— "
             f"{len(search_learning_rates)} learning-rate settings = {candidate_count} candidates. "
             f"Architecture fixed at {list(architecture.hidden_layers)}."
         )
@@ -739,7 +732,7 @@ if architecture is not None and preparation is not None:
                         + (
                             f"learning rate {rate:g}"
                             if search_optimizer == "adam"
-                            else "legacy vmmin quasi-Newton"
+                            else "legacy vmmin optimisation"
                         )
                     )
 
@@ -752,13 +745,13 @@ if architecture is not None and preparation is not None:
                     ):
                         if event["validation_loss"] is None:
                             message = (
-                                f"Candidate {candidate_index + 1}/{len(candidates)} — "
+                                f"Candidate {candidate_index + 1}/{len(candidates)} â€” "
                                 f"{step_label} {event['epoch']}"
                             )
                         else:
                             message = (
-                                f"Candidate {candidate_index + 1}/{len(candidates)} — "
-                                f"{step_label} {event['epoch']} — validation loss "
+                                f"Candidate {candidate_index + 1}/{len(candidates)} â€” "
+                                f"{step_label} {event['epoch']} â€” validation loss "
                                 f"{event['validation_loss']:.6g}"
                             )
                         search_status.write(message)
@@ -950,12 +943,10 @@ if architecture is not None and preparation is not None:
         ["adam", "vmmin"],
         index=0 if st.session_state.get("optimizer_name", "adam") == "adam" else 1,
         format_func=lambda value: (
-            "Adam"
-            if value == "adam"
-            else "Legacy ANNzPlus vmmin (variable-metric quasi-Newton)"
+            "Adam" if value == "adam" else "Legacy ANNzPlus vmmin"
         ),
         key="optimizer_name",
-        help="Faithful Python translation of the original ANNzPlus Tanh/train.cpp variable-metric routine; it uses a dense inverse-Hessian approximation.",
+        help="Legacy ANNzPlus training method. It requires tanh in every hidden layer and uses additional CPU memory for its optimisation state.",
     )
     train_left, train_mid = st.columns(2)
     with train_left:
@@ -1362,7 +1353,7 @@ if st.button("Prepare project ZIP"):
                 "learning_rate": float(st.session_state.get("learning_rate", 0.001))
                 if st.session_state.get("optimizer_name", "adam") == "adam"
                 else None,
-                "device": st.session_state.get("compute_device", "auto"),
+                "device": "auto",
                 "additional_epochs": int(st.session_state.get("epochs", 10)),
                 "prediction_error_columns": st.session_state.get(
                     "prediction_error_columns", {}
@@ -1385,7 +1376,7 @@ if st.button("Prepare project ZIP"):
                 "learning_rate": float(st.session_state.get("learning_rate", 0.001))
                 if st.session_state.get("optimizer_name", "adam") == "adam"
                 else None,
-                "device": st.session_state.get("compute_device", "auto"),
+                "device": "auto",
                 "additional_epochs": int(st.session_state.get("epochs", 10)),
                 "prediction_error_columns": st.session_state.get(
                     "prediction_error_columns", {}

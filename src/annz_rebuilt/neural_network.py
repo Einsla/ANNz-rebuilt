@@ -152,15 +152,25 @@ def train_model(
     initialization_seed: int | None = None,
     on_epoch: Callable[[dict], None] | None = None,
 ) -> dict:
-    """Train with mini-batch Adam or the legacy ANNzPlus vmmin optimiser."""
-    optimizer_name = optimizer_name.strip().lower().replace("-", "")
-    if optimizer_name in {"quasinewton", "lbfgs", "legacy_vmmin"}:
-        optimizer_name = "vmmin"
-    if optimizer_name not in {"adam", "vmmin"}:
-        raise ValueError("Choose Adam or legacy vmmin (quasi-Newton).")
+    """Dispatch training to Adam or the legacy ANNzPlus vmmin implementation."""
+    optimizer_name = str(optimizer_name).strip().lower()
     if early_stopping_patience is not None and early_stopping_patience < 1:
         raise ValueError("Early-stopping patience must be at least one.")
-    if optimizer_name == "vmmin":
+    if optimizer_name == "adam":
+        return _train_adam(
+            source,
+            architecture,
+            preparation,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            checkpoint_bytes=checkpoint_bytes,
+            separator=separator,
+            device=device,
+            early_stopping_patience=early_stopping_patience,
+            initialization_seed=initialization_seed,
+            on_epoch=on_epoch,
+        )
+    elif optimizer_name == "vmmin":
         if epochs < 1:
             raise ValueError("Maximum vmmin iterations must be positive.")
         if tuple(architecture.input_columns) != preparation.input_columns:
@@ -179,6 +189,25 @@ def train_model(
             initialization_seed=initialization_seed,
             on_epoch=on_epoch,
         )
+    else:
+        raise ValueError("Choose either Adam or legacy ANNzPlus vmmin.")
+
+
+def _train_adam(
+    source,
+    architecture,
+    preparation,
+    *,
+    epochs,
+    learning_rate,
+    checkpoint_bytes,
+    separator,
+    device,
+    early_stopping_patience,
+    initialization_seed,
+    on_epoch,
+) -> dict:
+    """Train the network using PyTorch's mini-batch Adam optimiser."""
     if epochs < 1 or not np.isfinite(learning_rate) or learning_rate <= 0:
         raise ValueError("Epochs and learning rate must be positive and finite.")
     if tuple(architecture.input_columns) != preparation.input_columns:
