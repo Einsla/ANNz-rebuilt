@@ -22,8 +22,56 @@ SUPPORTED_ACTIVATIONS = {
 
 
 @dataclass(frozen=True)
+class NetworkStructure:
+    """Describe network topology without choosing activation functions."""
+
+    input_columns: tuple[str, ...]
+    target_columns: tuple[str, ...]
+    hidden_layers: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "input_columns", tuple(self.input_columns))
+        object.__setattr__(self, "target_columns", tuple(self.target_columns))
+        object.__setattr__(
+            self, "hidden_layers", tuple(int(size) for size in self.hidden_layers)
+        )
+        if not self.input_columns or not self.target_columns:
+            raise ValueError("Select at least one input and one target variable.")
+        if not self.hidden_layers or any(size < 1 for size in self.hidden_layers):
+            raise ValueError(
+                "Provide at least one hidden layer with one or more neurons."
+            )
+        selected = (*self.input_columns, *self.target_columns)
+        if any(not name.strip() for name in selected):
+            raise ValueError("Variable names cannot be blank.")
+        if len(set(selected)) != len(selected):
+            raise ValueError("Input and target variables must be distinct.")
+
+    def to_config_dict(self) -> dict[str, Any]:
+        """Return the activation-independent topology for project records."""
+        return {
+            "input_columns": list(self.input_columns),
+            "target_columns": list(self.target_columns),
+            "hidden_layers": list(self.hidden_layers),
+        }
+
+    def with_activations(self, activations: Sequence[str]) -> "Architecture":
+        """Create a trainable architecture after activation choices are known."""
+        names = tuple(str(name).strip().lower() for name in activations)
+        if not names:
+            raise ValueError("Choose an activation function for every hidden layer.")
+        return Architecture(
+            self.input_columns,
+            self.target_columns,
+            self.hidden_layers,
+            names[0],
+            names,
+        )
+
+
+@dataclass(frozen=True)
 class Architecture:
-    """Network shape and the catalogue variables assigned to each role."""
+    """A trainable network configuration, including its chosen activations."""
 
     input_columns: tuple[str, ...]
     target_columns: tuple[str, ...]
@@ -142,11 +190,22 @@ class Architecture:
             config["hidden_activations"] = list(self.effective_activations)
         return config
 
+    def to_export_config_dict(self) -> dict[str, Any]:
+        """Return a self-describing export with one activation per hidden layer.
+
+        The internal config keeps legacy single-activation files compact. Exports
+        spell out every layer assignment so users can inspect and recreate the
+        optimised network without inferring repeated activations.
+        """
+        config = self.to_config_dict()
+        config["hidden_activations"] = list(self.effective_activations)
+        return config
+
     def write_config(self, path: str | Path) -> Path:
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(
-            json.dumps(self.to_config_dict(), indent=2) + "\n", encoding="utf-8"
+            json.dumps(self.to_export_config_dict(), indent=2) + "\n", encoding="utf-8"
         )
         return destination
 

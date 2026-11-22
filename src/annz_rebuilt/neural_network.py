@@ -152,21 +152,33 @@ def train_model(
     initialization_seed: int | None = None,
     on_epoch: Callable[[dict], None] | None = None,
 ) -> dict:
-    """Train with mini-batch Adam or the legacy ANNzPlus vmmin optimiser."""
-    optimizer_name = optimizer_name.strip().lower().replace("-", "")
-    if optimizer_name in {"quasinewton", "lbfgs", "legacy_vmmin"}:
-        optimizer_name = "vmmin"
+    """Dispatch training to Adam or the legacy ANNzPlus vmmin implementation."""
+    optimizer_name = str(optimizer_name).strip().lower()
     if optimizer_name not in {"adam", "vmmin"}:
-        raise ValueError("Choose Adam or legacy vmmin (quasi-Newton).")
+        raise ValueError("Choose either Adam or legacy ANNzPlus vmmin.")
+    if epochs < 1:
+        raise ValueError("Maximum training iterations must be positive.")
+    if tuple(architecture.input_columns) != preparation.input_columns:
+        raise ValueError("Network inputs do not match the prepared data.")
+    if tuple(architecture.target_columns) != preparation.target_columns:
+        raise ValueError("Network targets do not match the prepared data.")
     if early_stopping_patience is not None and early_stopping_patience < 1:
         raise ValueError("Early-stopping patience must be at least one.")
-    if optimizer_name == "vmmin":
-        if epochs < 1:
-            raise ValueError("Maximum vmmin iterations must be positive.")
-        if tuple(architecture.input_columns) != preparation.input_columns:
-            raise ValueError("Network inputs do not match the prepared data.")
-        if tuple(architecture.target_columns) != preparation.target_columns:
-            raise ValueError("Network targets do not match the prepared data.")
+    if optimizer_name == "adam":
+        return _train_adam(
+            source,
+            architecture,
+            preparation,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            checkpoint_bytes=checkpoint_bytes,
+            separator=separator,
+            device=device,
+            early_stopping_patience=early_stopping_patience,
+            initialization_seed=initialization_seed,
+            on_epoch=on_epoch,
+        )
+    elif optimizer_name == "vmmin":
         return _train_vmmin(
             source,
             architecture,
@@ -179,12 +191,25 @@ def train_model(
             initialization_seed=initialization_seed,
             on_epoch=on_epoch,
         )
-    if epochs < 1 or not np.isfinite(learning_rate) or learning_rate <= 0:
-        raise ValueError("Epochs and learning rate must be positive and finite.")
-    if tuple(architecture.input_columns) != preparation.input_columns:
-        raise ValueError("Network inputs do not match the prepared data.")
-    if tuple(architecture.target_columns) != preparation.target_columns:
-        raise ValueError("Network targets do not match the prepared data.")
+
+
+def _train_adam(
+    source,
+    architecture,
+    preparation,
+    *,
+    epochs,
+    learning_rate,
+    checkpoint_bytes,
+    separator,
+    device,
+    early_stopping_patience,
+    initialization_seed,
+    on_epoch,
+) -> dict:
+    """Train the network using PyTorch's mini-batch Adam optimiser."""
+    if not np.isfinite(learning_rate) or learning_rate <= 0:
+        raise ValueError("Learning rate must be positive and finite.")
     if early_stopping_patience is not None and preparation.validation_fraction <= 0:
         raise ValueError("Early stopping requires a non-empty validation split.")
     torch, nn = _torch()
@@ -200,6 +225,7 @@ def train_model(
     signature = _signature(architecture, preparation)
     history: list[dict] = []
     first_epoch = 0
+    best_epoch = 0
     if checkpoint_bytes:
         state = _read_checkpoint(checkpoint_bytes, torch, target_device, signature)
         model.load_state_dict(state["model_state"])
@@ -207,10 +233,12 @@ def train_model(
             optimizer.load_state_dict(state["optimizer_state"])
             history = list(state.get("history", []))
             first_epoch = int(state["epoch"])
+            best_epoch = int(state.get("best_epoch", first_epoch))
         else:
             # Keep trained weights, but initialise fresh Adam state after a switch.
             history = []
             first_epoch = 0
+            best_epoch = 0
             checkpoint_bytes = _pack_checkpoint(
                 torch, model, optimizer, 0, signature, history, "adam"
             )
@@ -229,7 +257,6 @@ def train_model(
     best_validation_loss = (
         initial_validation_loss if initial_validation_loss is not None else float("inf")
     )
-    best_epoch = first_epoch
     epochs_without_improvement = 0
     stopped_early = False
     completed_epoch = first_epoch
@@ -257,7 +284,7 @@ def train_model(
             # step() updates network weights using the gradients calculated by backward().
             optimizer.step()
             # PyTorch's mean MSE is already averaged over rows and targets.
-            # Weight by batch rows, then divide by total rows (not rows ? targets).
+            # Weight by batch rows, then divide by total rows, not rows times targets.
             loss_sum += loss.detach().item() * len(x_np)
             row_count += len(x_np)
         if row_count == 0:
@@ -296,11 +323,25 @@ def train_model(
 
     # Always retain the lowest-validation-loss checkpoint when validation exists,
     # even when patience-based early stopping is disabled.
-    selected_checkpoint = (
-        best_checkpoint if best_validation_loss < float("inf") else latest
+    selected_source = best_checkpoint if best_validation_loss < float("inf") else latest
+    selected_state = _read_checkpoint(selected_source, torch, target_device, signature)
+    model.load_state_dict(selected_state["model_state"])
+    if selected_state.get("optimizer_state") is not None:
+        optimizer.load_state_dict(selected_state["optimizer_state"])
+    selected_checkpoint = _pack_checkpoint(
+        torch,
+        model,
+        optimizer,
+        completed_epoch,
+        signature,
+        history,
+        "adam",
+        {
+            "best_epoch": best_epoch
+            if best_validation_loss < float("inf")
+            else completed_epoch
+        },
     )
-    if selected_checkpoint is None:
-        selected_checkpoint = latest
     return {
         "checkpoint_bytes": selected_checkpoint,
         "history": pd.DataFrame(history),
@@ -628,6 +669,7 @@ def _train_vmmin(
     signature = _signature(architecture, preparation)
     history = []
     previous_iterations = 0
+    previous_best_epoch = 0
     initial_alpha = 1.0
     initial_beta = 1.0
     if checkpoint_bytes:
@@ -635,6 +677,7 @@ def _train_vmmin(
         model.load_state_dict(state["model_state"])
         history = list(state.get("history", []))
         previous_iterations = int(state.get("epoch", 0))
+        previous_best_epoch = int(state.get("best_epoch", previous_iterations))
         if state.get("optimizer_name") == "vmmin":
             initial_alpha = float(state.get("vmmin_alpha", 1.0))
             initial_beta = float(state.get("vmmin_beta", 1.0))
@@ -651,14 +694,15 @@ def _train_vmmin(
             "not use validation-loss patience. Disable early stopping for vmmin."
         )
 
-    latest = checkpoint_bytes
     initial_validation_loss = _validation_loss(
         model, source, preparation, separator, torch, target_device
     )
     best_validation_loss = (
         initial_validation_loss if initial_validation_loss is not None else float("inf")
     )
-    best_iteration = previous_iterations
+    best_iteration = previous_best_epoch
+    best_alpha = initial_alpha
+    best_beta = initial_beta
     best_checkpoint = _pack_checkpoint(
         torch,
         model,
@@ -671,8 +715,9 @@ def _train_vmmin(
     )
     latest = best_checkpoint
 
-    def callback(index, weights, objective_value):
+    def callback(index, weights, objective_value, current_alpha, current_beta):
         nonlocal latest, best_checkpoint, best_validation_loss, best_iteration
+        nonlocal best_alpha, best_beta
         iteration = previous_iterations + index
         validation_loss = _validation_loss(
             model, source, preparation, separator, torch, target_device
@@ -691,12 +736,14 @@ def _train_vmmin(
             signature,
             history,
             "vmmin",
-            {"vmmin_alpha": initial_alpha, "vmmin_beta": initial_beta},
+            {"vmmin_alpha": current_alpha, "vmmin_beta": current_beta},
         )
         if validation_loss is not None and validation_loss < best_validation_loss:
             best_validation_loss = validation_loss
             best_iteration = iteration
             best_checkpoint = latest
+            best_alpha = current_alpha
+            best_beta = current_beta
         if on_epoch:
             on_epoch(
                 {
@@ -730,16 +777,35 @@ def _train_vmmin(
         "vmmin",
         {"vmmin_alpha": outcome["alpha"], "vmmin_beta": outcome["beta"]},
     )
-    if best_iteration == completed and np.isfinite(best_validation_loss):
-        best_checkpoint = latest
-    selected = best_checkpoint if np.isfinite(best_validation_loss) else latest
+    if np.isfinite(best_validation_loss):
+        selected_source = best_checkpoint
+        selected_alpha, selected_beta = best_alpha, best_beta
+        selected_best_epoch = best_iteration
+    else:
+        selected_source = latest
+        selected_alpha, selected_beta = outcome["alpha"], outcome["beta"]
+        selected_best_epoch = completed
+    selected_state = _read_checkpoint(selected_source, torch, target_device, signature)
+    model.load_state_dict(selected_state["model_state"])
+    selected = _pack_checkpoint(
+        torch,
+        model,
+        None,
+        completed,
+        signature,
+        history,
+        "vmmin",
+        {
+            "vmmin_alpha": selected_alpha,
+            "vmmin_beta": selected_beta,
+            "best_epoch": selected_best_epoch,
+        },
+    )
     return {
-        "checkpoint_bytes": selected or latest,
+        "checkpoint_bytes": selected,
         "history": pd.DataFrame(history),
         "completed_epoch": completed,
-        "best_epoch": best_iteration
-        if best_iteration > previous_iterations
-        else completed,
+        "best_epoch": selected_best_epoch,
         "best_validation_loss": (
             best_validation_loss if np.isfinite(best_validation_loss) else None
         ),

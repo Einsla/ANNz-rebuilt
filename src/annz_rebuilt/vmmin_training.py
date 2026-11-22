@@ -22,7 +22,7 @@ def train_with_vmmin(
     max_iterations: int,
     initial_alpha: float = 1.0,
     initial_beta: float = 1.0,
-    on_iteration: Callable[[int, np.ndarray, float], None] | None = None,
+    on_iteration: Callable[[int, np.ndarray, float, float, float], None] | None = None,
     max_dense_parameters: int = 5000,
 ):
     """Train with the legacy sum-of-squares + weight-decay objective.
@@ -128,7 +128,7 @@ def train_with_vmmin(
 
     def iteration_callback(index: int, vector: np.ndarray, value: float) -> None:
         if on_iteration is not None:
-            on_iteration(index, vector, value)
+            on_iteration(index, vector, value, alpha, beta)
 
     # Run the translated legacy ANNzPlus variable-metric optimiser with the objective and gradient above.
     result = vmmin(

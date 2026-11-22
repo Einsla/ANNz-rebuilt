@@ -48,8 +48,9 @@ For development and tests:
 - If Python is not found, install Python 3.9+ and enable the Python Launcher.
 - If shortcut creation is blocked by Windows policy, use
   `Run_ANNzPlus.bat` directly.
-- If CUDA is unavailable or GPU memory is insufficient, use the app's CPU
-  device option or use mini-batch Adam.
+- If CUDA is unavailable, the app automatically falls back to CPU. If GPU
+  memory is insufficient, reduce the training mini-batch size or use CPU-capable
+  execution; Adam is generally more suitable than dense vmmin for larger networks.
 - The first installation requires internet access.
 
 ## Updating

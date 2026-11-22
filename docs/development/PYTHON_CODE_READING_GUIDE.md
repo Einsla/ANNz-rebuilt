@@ -1,4 +1,4 @@
-# Python code reading guide ? ANNzPlus rebuild
+﻿# Python code reading guide ? ANNzPlus rebuild
 
 This guide complements explanations placed beside important library calls in the source. It assumes familiarity with basic Python, classes, functions and pandas DataFrames.
 
@@ -60,12 +60,16 @@ This guide complements explanations placed beside important library calls in the
 
 1. `app.py` collects files and settings through Streamlit.
 2. `data_analysis.py` scans the catalogue in chunks and creates data-quality summaries.
-3. `architecture.py` records input columns, target columns and hidden-layer sizes.
-4. `data_preparation.py` creates train/validation/test splits, calculates scaling values and yields batches.
-5. `neural_network.py` builds, trains, evaluates and predicts with one network.
-6. `committee.py` trains independent networks, averages predictions and estimates committee uncertainty.
-7. `legacy_vmmin.py` and `vmmin_training.py` implement the legacy variable-metric optimiser.
-8. `model_bundle.py` saves a trained model for later prediction; `project.py` saves the wider project and optional source catalogue/reports.
+3. `architecture.py` separates `NetworkStructure` (input/target columns and hidden-layer sizes) from `Architecture` (the trainable model with one activation assigned to each hidden layer).
+4. `app.py` lets the user select activation candidates independently for each hidden layer; optimisation evaluates their combinations while keeping the selected network structure fixed.
+5. `data_preparation.py` creates train/validation/test splits, calculates scaling values and yields batches.
+6. `neural_network.py` builds, trains, evaluates and predicts with one network.
+7. `committee.py` trains independent networks, averages predictions and estimates committee uncertainty.
+8. `train_model()` dispatches explicitly to `_train_adam()` or `_train_vmmin()`; each function owns its optimiser's training workflow.
+9. `legacy_vmmin.py` and `vmmin_training.py` implement the legacy variable-metric quasi-Newton optimiser.
+10. `model_bundle.py` saves a trained model for later prediction; `project.py` saves the wider project and optional source catalogue/reports.
+
+The exported `architecture_config.json`, trained-model bundle and project ZIP include `hidden_activations` as an explicit ordered list. Its first item belongs to hidden layer 1, its second item to hidden layer 2, and so on. This is written even when all layers use the same activation, so the saved architecture always shows the activation assigned to every layer.
 
 ## Understanding the uncertainty calculation
 

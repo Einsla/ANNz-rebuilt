@@ -1,6 +1,6 @@
 """Core components for local galaxy neural-network analysis."""
 
-from .architecture import Architecture, architecture_from_selections
+from .architecture import Architecture, NetworkStructure, architecture_from_selections
 from .data_analysis import analyze_catalogue_csv
 from .data_preparation import (
     DataPreparation,
@@ -17,6 +17,7 @@ from .project import ProjectArchive, create_project_zip, open_project_zip
 
 __all__ = [
     "Architecture",
+    "NetworkStructure",
     "DataPreparation",
     "ProjectArchive",
     "analyze_catalogue_csv",

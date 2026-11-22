@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from annz_rebuilt.architecture import Architecture
+from annz_rebuilt.architecture import Architecture, NetworkStructure
 from annz_rebuilt.data_preparation import (
     DataPreparation,
     fit_data_preparation,
@@ -54,6 +54,38 @@ def prepared():
 def test_architecture_rejects_input_target_overlap():
     with pytest.raises(ValueError, match="distinct"):
         Architecture(("x",), ("x",), (8,))
+
+
+def test_network_structure_is_activation_independent():
+    structure = NetworkStructure(("g", "r"), ("z",), (16, 8))
+    assert structure.to_config_dict() == {
+        "input_columns": ["g", "r"],
+        "target_columns": ["z"],
+        "hidden_layers": [16, 8],
+    }
+    model_architecture = structure.with_activations(("relu", "tanh"))
+    assert model_architecture.hidden_layers == (16, 8)
+    assert model_architecture.effective_activations == ("relu", "tanh")
+    assert model_architecture.to_config_dict()["hidden_activations"] == [
+        "relu",
+        "tanh",
+    ]
+
+
+def test_architecture_export_always_lists_each_hidden_activation():
+    architecture = NetworkStructure(("g",), ("z",), (8, 4)).with_activations(
+        ("tanh", "tanh")
+    )
+    assert "hidden_activations" not in architecture.to_config_dict()
+    assert architecture.to_export_config_dict()["hidden_activations"] == [
+        "tanh",
+        "tanh",
+    ]
+
+
+def test_network_structure_rejects_invalid_topology():
+    with pytest.raises(ValueError, match="hidden layer"):
+        NetworkStructure(("g",), ("z",), ())
 
 
 def test_split_and_epoch_shuffle_are_reproducible(prepared):
@@ -239,6 +271,95 @@ def test_mixed_activation_checkpoint_can_be_reloaded(prepared):
     )
     assert len(report) == 2
     assert architecture.to_config_dict()["hidden_activations"] == ["relu", "tanh"]
+
+
+def _assert_selected_checkpoint_history_matches_saved_checkpoint(
+    prepared, monkeypatch, optimizer_name
+):
+    source, preparation, architecture = prepared
+    validation_losses = iter([1.0, 0.5, 0.8, 0.9, 0.4, 0.6, 0.7])
+
+    def controlled_validation_loss(*args, **kwargs):
+        return next(validation_losses)
+
+    monkeypatch.setattr(
+        "annz_rebuilt.neural_network._validation_loss", controlled_validation_loss
+    )
+    trained = train_model(
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=3,
+        optimizer_name=optimizer_name,
+        device="cpu",
+    )
+    torch = pytest.importorskip("torch")
+    saved = torch.load(
+        io.BytesIO(trained["checkpoint_bytes"]),
+        map_location="cpu",
+        weights_only=True,
+    )
+
+    assert saved["epoch"] == trained["completed_epoch"]
+    assert saved["best_epoch"] == trained["best_epoch"]
+    assert trained["best_epoch"] <= trained["completed_epoch"]
+    assert trained["history"]["epoch"].tolist() == [
+        row["epoch"] for row in saved["history"]
+    ]
+
+    continued = train_model(
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=1,
+        optimizer_name=optimizer_name,
+        checkpoint_bytes=trained["checkpoint_bytes"],
+        device="cpu",
+    )
+    continued_state = torch.load(
+        io.BytesIO(continued["checkpoint_bytes"]),
+        map_location="cpu",
+        weights_only=True,
+    )
+    assert continued["completed_epoch"] >= trained["completed_epoch"]
+    assert continued["best_epoch"] == trained["best_epoch"]
+    assert continued_state["best_epoch"] == trained["best_epoch"]
+    assert continued["history"]["epoch"].tolist()[: len(trained["history"])] == (
+        trained["history"]["epoch"].tolist()
+    )
+
+
+@pytest.mark.parametrize("optimizer_name", ["adam", "vmmin"])
+def test_selected_checkpoint_history_is_consistent(
+    prepared, monkeypatch, optimizer_name
+):
+    _assert_selected_checkpoint_history_matches_saved_checkpoint(
+        prepared, monkeypatch, optimizer_name
+    )
+
+
+@pytest.mark.parametrize(
+    "activation",
+    ["tanh", "sigmoid", "leaky_relu", "relu", "mish", "softplus", "silu"],
+)
+def test_vmmin_trains_with_each_supported_activation(prepared, activation):
+    source, preparation, _ = prepared
+    architecture = Architecture(
+        ("x1", "x2"),
+        ("z", "mass"),
+        (4,),
+        activation,
+    )
+    trained = train_model(
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        epochs=2,
+        optimizer_name="vmmin",
+        device="cpu",
+    )
+    assert trained["checkpoint_bytes"]
+    assert trained["completed_epoch"] >= 1
 
 
 def test_project_zip_round_trip(prepared):

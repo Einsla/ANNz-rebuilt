@@ -60,6 +60,24 @@ def test_committee_members_have_independent_seeds_and_checkpoint_roundtrips():
     assert trained["history"]["member"].nunique() == 3
 
 
+def test_vmmin_committee_supports_non_tanh_activation():
+    source, preparation, _ = _fixture()
+    architecture = Architecture(("x1", "x2"), ("z",), (2,), "relu")
+    trained = train_committee(
+        io.BytesIO(source),
+        architecture,
+        preparation,
+        committee_size=2,
+        epochs=2,
+        optimizer_name="vmmin",
+        device="cpu",
+        base_seed=17,
+    )
+    members, metadata = unpack_committee(trained["checkpoint_bytes"])
+    assert len(members) == 2
+    assert metadata["committee_size"] == 2
+
+
 def test_committee_uncertainties_match_cxx_variance_and_quadrature():
     source, preparation, architecture = _fixture()
     trained = train_committee(

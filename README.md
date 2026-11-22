@@ -1,10 +1,12 @@
 # ANNzPlus Python Rebuild
 
+**Version 2.0.0** - major feature release. See [CHANGELOG.md](CHANGELOG.md) for the full change history.
+
 ## Project overview
 
 This project investigates and rebuilds the legacy [ANNzPlus](https://github.com/imdadmpt/ANNzPlus) photometric-redshift workflow in Python. It provides a local Streamlit interface for catalogue analysis, neural-network architecture design, training, evaluation, prediction, and reusable project archives.
 
-This is a research rebuild, not a claim of bit-for-bit or scientific equivalence with the original C++ implementation. See [the parity assessment](docs/development/ANNZPLUS_PARITY.md) for confirmed differences and remaining work. The current merged milestone is recorded in the [19 November 2026 project checkpoint](docs/checkpoints/2026-11-19-committee-and-input-error-propagation.md).
+This is a research rebuild, not a claim of bit-for-bit or scientific equivalence with the original C++ implementation. See the [legacy-versus-Python comparison](docs/development/LEGACY_VS_PYTHON.md) and [parity assessment](docs/development/ANNZPLUS_PARITY.md) for confirmed differences and remaining work. The committee/error-propagation milestone and the 22 November 2026 deep code review are now integrated into `main`. See the [19 November milestone checkpoint](docs/checkpoints/2026-11-19-committee-and-input-error-propagation.md), [22 November code-review checkpoint](docs/checkpoints/2026-11-22-deep-code-review.md), and [CHANGELOG.md](CHANGELOG.md).
 
 ## Install on Windows
 
@@ -57,7 +59,7 @@ The test split is held out from architecture and hyperparameter selection. It sh
 ## Optimisers
 
 - **Adam:** mini-batch gradient optimisation with an explicit learning-rate setting. Each epoch passes through the full training split.
-- **Legacy vmmin:** Python port of the original ANNzPlus Tanh/train.cpp variable-metric optimiser, including its dense inverse-Hessian update, line search, reset rules and periodic weight-decay update. It uses the full training-set objective and gradient but streams the catalogue in chunks between evaluations. It is restricted to tanh hidden activations and has O(number_of_weights**2) CPU-memory cost. Use smaller networks; Adam is recommended for larger catalogues or architectures.
+- **Legacy vmmin:** Python port of the original ANNzPlus variable-metric optimiser (verified against the activation-specific C++ implementations), including its dense inverse-Hessian update, line search, reset rules and periodic weight-decay update. It uses the full training-set objective and gradient but streams the catalogue in chunks between evaluations. It supports all seven implemented hidden activations (Tanh, Sigmoid, Leaky ReLU, ReLU, Mish, Softplus and SiLU) and has O(P**2) CPU-memory cost, where P is the number of trainable parameters. Use smaller networks; Adam is recommended for larger catalogues or architectures.
 
 The vmmin port is not yet end-to-end scientific parity: data normalisation, random initialisation and floating-point execution still differ from C++. See the parity assessment in docs/development/ANNZPLUS_PARITY.md.
 
@@ -67,7 +69,7 @@ The vmmin port is not yet end-to-end scientific parity: data normalisation, rand
 - `src/annz_rebuilt/`: reusable application and scientific-computing modules.
 - `tests/`: automated regression and workflow tests.
 - `docs/user-guide/`: local usage and project workflow documentation.
-- `docs/development/`: implementation notes, C++ parity assessment, and the [Python code reading guide](docs/development/PYTHON_CODE_READING_GUIDE.md) explaining library calls used throughout the app.
+- `docs/development/`: implementation notes, [legacy-versus-Python comparison](docs/development/LEGACY_VS_PYTHON.md), C++ parity assessment, and the [Python code reading guide](docs/development/PYTHON_CODE_READING_GUIDE.md) explaining library calls used throughout the app.
 - `docs/checkpoints/`: dated implementation checkpoints and resume notes.
 - `docs/research/`: research notes and meeting outcomes.
 - `installation/`: platform installation resources and guides.
@@ -76,7 +78,7 @@ The vmmin port is not yet end-to-end scientific parity: data normalisation, rand
 
 ## Project ZIP
 
-A standalone `.annzmodel` artifact can be downloaded after training. It contains the trained network weights, architecture, fitted input/target scaling, optimiser state when available, training configuration, epoch/iteration loss history, and optimisation results. It intentionally excludes the original catalogue. In a later session, load the `.annzmodel` file and upload a new catalogue with the saved input columns; the app runs prediction using the saved weights without retraining. The input catalogue is required for prediction, but it does not need the training targets.
+A standalone `.annzmodel` artifact can be downloaded after training. It contains the best-validation network weights, matching optimiser state when available, architecture, fitted input/target scaling, training configuration, complete epoch/iteration loss history, and optimisation results. Its continuation counter remains monotonic even when the selected weights came from an earlier best-validation epoch. It intentionally excludes the original catalogue. In a later session, load the `.annzmodel` file and upload a new catalogue with the saved input columns; the app runs prediction using the saved weights without retraining. The input catalogue is required for prediction, but it does not need the training targets.
 
 A full project ZIP can contain:
 
