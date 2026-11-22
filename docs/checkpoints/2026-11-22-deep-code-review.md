@@ -2,10 +2,11 @@
 
 ## Scope
 
-Deep review of the current Python ANNzPlus application on
-`feature/separate-network-structure-activation-search`. This checkpoint
-records the review fixes and verified behaviour; it does not claim scientific
-equivalence with the original C++ implementation.
+Deep review of the Python ANNzPlus application and the review fixes originally
+developed on `feature/separate-network-structure-activation-search`. The work
+was subsequently merged into `main` as part of the v2.0.0 release. This
+checkpoint records the review fixes and verified behaviour; it does not claim
+scientific equivalence with the original C++ implementation.
 
 ## Review findings and changes
 
@@ -50,9 +51,15 @@ numerical parity with compiled C++ ANNzPlus. Controlled C++/Python comparisons
 for activations, vmmin, normalization, initialisation, predictions and
 uncertainty propagation remain outstanding.
 
-## Current branch state
+## Branch and release history
 
-- Branch: `feature/separate-network-structure-activation-search`
-- Main remains unchanged.
-- Review commit: `0892a62f410cda8e9d7255dd91261c4f6e13d805` (`Fix resumable best-model checkpoints and review app`).
-- `main` is unchanged; this checkpoint belongs to the feature branch.
+- At the time of the review, the work was on
+  `feature/separate-network-structure-activation-search`.
+- Review commit: `35edc65` (`Fix resumable best-model checkpoints and review app`)
+  was included in the subsequent release branch history.
+- The feature was later merged into `main` in PR #2, titled
+  `ANNzPlus Python v2.0.0`.
+- Repository state checked on 22 November 2026: local `main` and
+  `origin/main` both point to `7286f1e` (release merge commit), tagged
+  `v2.0.0`. The feature branch remains available as historical development
+  context; it is not the current checked-out branch.
