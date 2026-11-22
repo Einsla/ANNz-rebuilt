@@ -1,4 +1,6 @@
-﻿# Local app quick start
+# Local app quick start
+
+**Version 2.0.0** is the current major release. The release changes are summarised in the [changelog](../../CHANGELOG.md).
 
 For the latest reviewed implementation state and known parity gaps, see the [22 November 2026 code-review checkpoint](../checkpoints/2026-11-22-deep-code-review.md).
 

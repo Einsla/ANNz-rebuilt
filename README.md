@@ -1,10 +1,12 @@
 # ANNzPlus Python Rebuild
 
+**Version 2.0.0** - major feature release. See [CHANGELOG.md](CHANGELOG.md) for the full change history.
+
 ## Project overview
 
 This project investigates and rebuilds the legacy [ANNzPlus](https://github.com/imdadmpt/ANNzPlus) photometric-redshift workflow in Python. It provides a local Streamlit interface for catalogue analysis, neural-network architecture design, training, evaluation, prediction, and reusable project archives.
 
-This is a research rebuild, not a claim of bit-for-bit or scientific equivalence with the original C++ implementation. See the [legacy-versus-Python comparison](docs/development/LEGACY_VS_PYTHON.md) and [parity assessment](docs/development/ANNZPLUS_PARITY.md) for confirmed differences and remaining work. The committee/error-propagation milestone on `main` is recorded in the [19 November 2026 checkpoint](docs/checkpoints/2026-11-19-committee-and-input-error-propagation.md). The active feature-branch review and checkpoint-continuation fixes are recorded in the [22 November 2026 code-review checkpoint](docs/checkpoints/2026-11-22-deep-code-review.md).
+This is a research rebuild, not a claim of bit-for-bit or scientific equivalence with the original C++ implementation. See the [legacy-versus-Python comparison](docs/development/LEGACY_VS_PYTHON.md) and [parity assessment](docs/development/ANNZPLUS_PARITY.md) for confirmed differences and remaining work. The committee/error-propagation milestone and the 22 November 2026 deep code review are now integrated into `main`. See the [19 November milestone checkpoint](docs/checkpoints/2026-11-19-committee-and-input-error-propagation.md), [22 November code-review checkpoint](docs/checkpoints/2026-11-22-deep-code-review.md), and [CHANGELOG.md](CHANGELOG.md).
 
 ## Install on Windows
 

@@ -71,13 +71,13 @@ It uses the training-target mean as its reference. R2 uses the evaluated split's
 
 The optimisation objective is mean squared error in the scaled target space. The reported MAE/RMSE are converted back to the original target units.
 
-## Integrated milestone and current feature branch (22 November 2026)
+## Integrated Version 2.0.0 milestone (22 November 2026)
 
-The committee and input measurement-error propagation milestone is recorded in [the 19 November checkpoint](../checkpoints/2026-11-19-committee-and-input-error-propagation.md) and remains on `main`. The active feature branch additionally includes shared training validation, all-seven-activation vmmin support for individual and committee training, and a checkpoint/history consistency fix for both Adam and vmmin.
+The committee and input measurement-error propagation milestone is recorded in [the 19 November checkpoint](../checkpoints/2026-11-19-committee-and-input-error-propagation.md). Version 2.0.0 integrates that milestone with shared training validation, all-seven-activation vmmin support for individual and committee training, and checkpoint/history consistency fixes for both Adam and vmmin.
 
 When validation data is available, the exported checkpoint retains the weights and optimiser state from the best validation-loss iteration. Its epoch counter and embedded loss history still record the full completed run, so continuing training does not repeat epoch numbers or discard later training records. For vmmin, the selected checkpoint also retains the weight-decay alpha/beta values associated with the selected weights.
 
-The latest verification result is recorded in the [22 November code-review checkpoint](../checkpoints/2026-11-22-deep-code-review.md). Passing software tests confirms regression behaviour, not numerical scientific parity with C++.
+The release verification and implementation notes are recorded in the [22 November code-review checkpoint](../checkpoints/2026-11-22-deep-code-review.md). Passing software tests confirms regression behaviour, not numerical scientific parity with C++.
 
 ## Parity work still required
 
